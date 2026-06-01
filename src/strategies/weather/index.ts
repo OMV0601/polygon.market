@@ -1,0 +1,1 @@
+export { WeatherStrategy } from './WeatherStrategy';

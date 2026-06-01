@@ -1,0 +1,1 @@
+export { WalletMirrorStrategy } from './WalletMirrorStrategy';

@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>polygon.market</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0d1117; --surface: #161b22; --surface2: #1c2128;
+      --border: #30363d; --text: #e6edf3; --muted: #8b949e; --dim: #6e7681;
+      --blue: #58a6ff; --green: #3fb950; --red: #f85149;
+      --yellow: #d29922; --purple: #bc8cff; --orange: #ffa657;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; }
+    .mono { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; }
+
+    /* ── Header ── */
+    header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 0 20px; height: 52px; display: flex; align-items: center; gap: 16px;
+      position: sticky; top: 0; z-index: 100;
+    }
+    .logo { font-size: 16px; font-weight: 700; color: var(--text); letter-spacing: -0.5px; }
+    .logo span { color: var(--blue); }
+    .spacer { flex: 1; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600;
+      border: 1px solid transparent;
+    }
+    .chip .dot { width: 6px; height: 6px; border-radius: 50%; }
+    .chip.up    { background: #0d2b0d; border-color: #1a4d1a; color: var(--green); }
+    .chip.up .dot { background: var(--green); }
+    .chip.down  { background: #2b0d0d; border-color: #4d1a1a; color: var(--red); }
+    .chip.down .dot { background: var(--red); }
+    .chip.warn  { background: #2b200d; border-color: #4d3a1a; color: var(--yellow); }
+    .chip.warn .dot { background: var(--yellow); }
+    .chip.dry   { background: #0d1e2b; border-color: #1a3a4d; color: var(--blue); }
+    .chip.dry .dot { background: var(--blue); }
+    .chip.live  { background: #0d2b0d; border-color: #1a4d1a; color: var(--green); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+    .kill-btn {
+      background: #2b0d0d; border: 1px solid #4d1a1a; color: var(--red);
+      padding: 6px 16px; border-radius: 6px; font-size: 12px; font-weight: 700;
+      cursor: pointer; transition: all .15s;
+    }
+    .kill-btn:hover { background: var(--red); color: #fff; }
+
+    /* ── Layout ── */
+    main { max-width: 1400px; margin: 0 auto; padding: 20px; display: grid; gap: 20px; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; overflow: hidden;
+    }
+    .card-header {
+      padding: 12px 16px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .card-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
+    .card-badge {
+      background: var(--surface2); border: 1px solid var(--border);
+      padding: 1px 8px; border-radius: 10px; font-size: 11px; color: var(--muted);
+    }
+    .refresh-timer { margin-left: auto; font-size: 11px; color: var(--dim); }
+
+    /* ── Health grid ── */
+    .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; padding: 16px; }
+    .health-item {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 6px; padding: 12px 14px;
+    }
+    .health-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+    .health-value { font-size: 14px; font-weight: 700; }
+    .health-sub { font-size: 11px; color: var(--dim); margin-top: 2px; }
+    .val-up { color: var(--green); }
+    .val-down { color: var(--red); }
+    .val-warn { color: var(--yellow); }
+    .val-blue { color: var(--blue); }
+
+    /* ── Tables ── */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      padding: 8px 12px; text-align: left; font-size: 11px; font-weight: 600;
+      color: var(--muted); text-transform: uppercase; letter-spacing: .5px;
+      border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    td { padding: 9px 12px; border-bottom: 1px solid #1c2128; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--surface2); }
+    .empty-row td { text-align: center; color: var(--dim); padding: 32px; font-style: italic; }
+
+    /* Strategy badges */
+    .strat { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .strat-WALLET_MIRROR   { background: #0d1e2b; color: var(--blue); }
+    .strat-WEATHER         { background: #1a0d2b; color: var(--purple); }
+    .strat-NEWS_CATALYST   { background: #2b1a0d; color: var(--orange); }
+    .strat-CORRELATION_ARB { background: #0d2b0d; color: var(--green); }
+
+    /* Outcome badges */
+    .outcome-YES { color: var(--green); font-weight: 700; }
+    .outcome-NO  { color: var(--red);   font-weight: 700; }
+
+    /* Status badges */
+    .status { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .status-SIMULATED { background: #0d1e2b; color: var(--blue); }
+    .status-APPROVED  { background: #0d2b0d; color: var(--green); }
+    .status-REJECTED  { background: #2b0d0d; color: var(--red); }
+
+    /* Preview button */
+    .preview-btn {
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); padding: 3px 10px; border-radius: 4px;
+      font-size: 11px; cursor: pointer; transition: all .15s; white-space: nowrap;
+    }
+    .preview-btn:hover { border-color: var(--blue); color: var(--blue); }
+
+    /* ── Portfolio grid ── */
+    .portfolio-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 20px; }
+    @media (max-width: 900px) { .portfolio-grid { grid-template-columns: 1fr; } }
+    .pnl-summary { padding: 16px; display: grid; gap: 12px; }
+    .pnl-stat { display: flex; flex-direction: column; gap: 2px; }
+    .pnl-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+    .pnl-value { font-size: 22px; font-weight: 700; }
+    .pnl-pos { color: var(--green); }
+    .pnl-neg { color: var(--red); }
+    .pnl-zero { color: var(--muted); }
+    .chart-wrap { padding: 16px; position: relative; height: 200px; }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.7); z-index: 200;
+      align-items: center; justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 24px; min-width: 460px; max-width: 600px;
+    }
+    .modal h3 { font-size: 14px; margin-bottom: 16px; color: var(--text); }
+    .modal-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); }
+    .modal-row:last-of-type { border-bottom: none; }
+    .modal-key { color: var(--muted); font-size: 12px; }
+    .modal-val { font-size: 12px; font-weight: 600; }
+    .cmd-box {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 10px 12px; margin: 14px 0;
+      font-family: monospace; font-size: 12px; color: var(--green);
+      word-break: break-all;
+    }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .btn { padding: 7px 16px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid transparent; }
+    .btn-ghost { background: var(--surface2); border-color: var(--border); color: var(--text); }
+    .btn-ghost:hover { border-color: var(--blue); }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">polygon<span>.</span>market</div>
+  <div id="chip-bullpen" class="chip down"><span class="dot"></span>bullpen</div>
+  <div id="chip-db"      class="chip down"><span class="dot"></span>database</div>
+  <div id="chip-mode"    class="chip dry" ><span class="dot"></span>DRY_RUN</div>
+  <div class="spacer"></div>
+  <span id="uptime" style="color:var(--dim);font-size:11px;margin-right:8px;"></span>
+  <button class="kill-btn" onclick="killSwitch()">⚠ KILL SWITCH</button>
+</header>
+
+<!-- ── Main ──────────────────────────────────────────────────────── -->
+<main>
+
+  <!-- Health -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">System Health</span>
+      <span id="refresh-timer" class="refresh-timer">Refresh in 5s</span>
+    </div>
+    <div class="health-grid" id="health-grid">
+      <div class="health-item">
+        <div class="health-label">Bullpen CLI</div>
+        <div class="health-value val-down" id="h-bullpen">—</div>
+        <div class="health-sub" id="h-bullpen-sub"></div>
+      </div>
+      <div class="health-item">
+        <div class="health-label">Database</div>
+        <div class="health-value val-down" id="h-db">—</div>
+        <div class="health-sub" id="h-db-sub"></div>
+      </div>
+      <div class="health-item">
+        <div class="health-label">Execution Mode</div>
+        <div class="health-value val-blue" id="h-mode">—</div>
+        <div class="health-sub">LIVE_EXECUTION_ENABLED</div>
+      </div>
+      <div class="health-item">
+        <div class="health-label">Uptime</div>
+        <div class="health-value val-blue" id="h-uptime">—</div>
+        <div class="health-sub" id="h-ts"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Alpha Feed -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Alpha Feed</span>
+      <span class="card-badge" id="candidates-count">0</span>
+      <span style="color:var(--dim);font-size:11px;margin-left:auto;">Approved candidates — DRY_RUN simulated fills</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Strategy</th>
+            <th>Market Slug</th>
+            <th>Outcome</th>
+            <th>Impl. Prob</th>
+            <th>Confidence</th>
+            <th>Size (USDC)</th>
+            <th>Status</th>
+            <th>Signal</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="candidates-body">
+          <tr class="empty-row"><td colspan="10">No approved candidates yet — strategies are scanning</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Portfolio -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Simulated Portfolio</span>
+      <span class="card-badge" id="positions-count">0 positions</span>
+    </div>
+    <div class="portfolio-grid">
+      <div class="pnl-summary">
+        <div class="pnl-stat">
+          <span class="pnl-label">Cost Basis</span>
+          <span class="pnl-value pnl-zero" id="pnl-basis">$0.00</span>
+        </div>
+        <div class="pnl-stat">
+          <span class="pnl-label">Unrealized PnL</span>
+          <span class="pnl-value pnl-zero" id="pnl-unrealized">$0.00</span>
+        </div>
+        <div class="pnl-stat">
+          <span class="pnl-label">Open Positions</span>
+          <span class="pnl-value pnl-zero" id="pnl-count">0</span>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="pnl-chart"></canvas>
+      </div>
+    </div>
+    <div class="table-wrap" style="border-top:1px solid var(--border)">
+      <table>
+        <thead>
+          <tr>
+            <th>Market Slug</th><th>Outcome</th><th>Shares</th>
+            <th>Entry Price</th><th>Current Price</th><th>Unrealized PnL</th><th>Opened</th>
+          </tr>
+        </thead>
+        <tbody id="positions-body">
+          <tr class="empty-row"><td colspan="7">No open positions yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Execution Log -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Execution Log</span>
+      <span style="color:var(--dim);font-size:11px;margin-left:auto;">Last 20 entries</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Action</th><th>Market Slug</th><th>Outcome</th>
+            <th>Size (USDC)</th><th>Price</th><th>Mode</th><th>Status</th><th>Command</th>
+          </tr>
+        </thead>
+        <tbody id="log-body">
+          <tr class="empty-row"><td colspan="9">No executions yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<!-- ── Preview Modal ──────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h3>📋 Order Preview</h3>
+    <div id="modal-rows"></div>
+    <div class="cmd-box" id="modal-cmd"></div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:4px;">
+      This is a DRY_RUN simulation. Set LIVE_EXECUTION_ENABLED=true in .env to enable live orders.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const POLL_INTERVAL = 5000;
+let countdown = 5;
+let pnlChart = null;
+let pnlData = { labels: [], values: [] };
+
+// ── Init Chart ────────────────────────────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('pnl-chart').getContext('2d');
+  pnlChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: pnlData.labels,
+      datasets: [{
+        label: 'Simulated PnL (USDC)',
+        data: pnlData.values,
+        borderColor: '#3fb950',
+        backgroundColor: 'rgba(63,185,80,0.08)',
+        borderWidth: 2,
+        pointRadius: 3,
+        pointBackgroundColor: '#3fb950',
+        fill: true,
+        tension: 0.3,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#6e7681', font: { size: 10 } }, grid: { color: '#30363d' } },
+        y: {
+          ticks: { color: '#6e7681', font: { size: 10 }, callback: v => '$' + Number(v).toFixed(2) },
+          grid: { color: '#30363d' }
+        }
+      }
+    }
+  });
+}
+
+// ── Fetch Health ──────────────────────────────────────────────────
+async function fetchHealth() {
+  try {
+    const r = await fetch('/api/health');
+    const d = await r.json();
+
+    const bp = d.bullpen;
+    setChip('chip-bullpen', bp.connected ? 'up' : 'down', 'bullpen');
+    setEl('h-bullpen', bp.connected ? 'UP' : 'DOWN', bp.connected ? 'val-up' : 'val-down');
+    setEl('h-bullpen-sub', bp.connected ? `v${bp.version} · ${bp.latencyMs}ms` : bp.error?.slice(0,40) + '…');
+
+    setChip('chip-db', d.database.healthy ? 'up' : 'down', 'database');
+    setEl('h-db', d.database.healthy ? 'UP' : 'DOWN', d.database.healthy ? 'val-up' : 'val-down');
+    setEl('h-db-sub', `schema v${d.database.schemaVersion}`);
+
+    const isLive = d.executionMode === 'LIVE';
+    setChip('chip-mode', isLive ? 'live' : 'dry', d.executionMode);
+    setEl('h-mode', d.executionMode, isLive ? 'val-up' : 'val-blue');
+
+    const up = d.uptimeSeconds;
+    const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60), s = up % 60;
+    const upStr = `${h}h ${m}m ${s}s`;
+    setEl('h-uptime', upStr, 'val-blue');
+    setEl('uptime', upStr);
+    setEl('h-ts', new Date(d.timestamp).toLocaleTimeString());
+  } catch {}
+}
+
+// ── Fetch Candidates ──────────────────────────────────────────────
+async function fetchCandidates() {
+  try {
+    const r = await fetch('/api/candidates?limit=50');
+    const d = await r.json();
+    const tbody = document.getElementById('candidates-body');
+    document.getElementById('candidates-count').textContent = d.total;
+
+    if (!d.candidates.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="10">No approved candidates yet — strategies are scanning</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = d.candidates.map(c => {
+      let signal = '—';
+      try {
+        const s = JSON.parse(c.externalSignal || '{}');
+        if (s.delta !== undefined) signal = `Δ${Number(s.delta).toFixed(3)}`;
+        else if (s.gap !== undefined) signal = `gap ${Number(s.gap).toFixed(3)}`;
+        else if (s.sentiment) signal = s.sentiment.replace('_CATALYST','');
+        else if (s.netMargin !== undefined) signal = `arb ${(s.netMargin*100).toFixed(1)}%`;
+      } catch {}
+
+      return `<tr>
+        <td class="mono" style="color:var(--dim);font-size:11px">${new Date(c.createdAt).toLocaleTimeString()}</td>
+        <td><span class="strat strat-${c.strategy}">${c.strategy.replace('_',' ')}</span></td>
+        <td class="mono" style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${c.marketSlug}">${c.marketSlug}</td>
+        <td><span class="outcome-${c.outcome}">${c.outcome}</span></td>
+        <td class="mono">${(c.impliedProbability * 100).toFixed(1)}%</td>
+        <td>
+          <span style="color:${confColor(c.confidenceScore)}">${c.confidenceScore ? (c.confidenceScore * 100).toFixed(0) + '%' : '—'}</span>
+        </td>
+        <td class="mono">$${(c.suggestedSize || 0).toFixed(2)}</td>
+        <td><span class="status status-${c.riskStatus}">${c.riskStatus}</span></td>
+        <td class="mono" style="color:var(--muted);font-size:11px">${signal}</td>
+        <td><button class="preview-btn" onclick="showPreview(${c.id})">Preview</button></td>
+      </tr>`;
+    }).join('');
+  } catch {}
+}
+
+// ── Fetch Portfolio ───────────────────────────────────────────────
+async function fetchPortfolio() {
+  try {
+    const r = await fetch('/api/portfolio');
+    const d = await r.json();
+    const { summary, positions } = d;
+
+    setEl('pnl-basis', '$' + summary.totalCostBasis.toFixed(2));
+    const pnlEl = document.getElementById('pnl-unrealized');
+    const pnl = summary.unrealizedPnl;
+    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+    pnlEl.className = 'pnl-value ' + (pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : 'pnl-zero');
+    setEl('pnl-count', summary.openCount);
+    document.getElementById('positions-count').textContent = summary.openCount + ' position' + (summary.openCount === 1 ? '' : 's');
+
+    const tbody = document.getElementById('positions-body');
+    if (!positions.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No open positions yet</td></tr>';
+    } else {
+      tbody.innerHTML = positions.map(p => {
+        const upnl = p.unrealizedPnl;
+        const pnlStr = upnl != null
+          ? `<span style="color:${upnl >= 0 ? 'var(--green)' : 'var(--red)'};">${(upnl >= 0 ? '+' : '')}$${upnl.toFixed(2)}</span>`
+          : '<span style="color:var(--dim)">—</span>';
+        return `<tr>
+          <td class="mono" style="font-size:11px" title="${p.marketSlug}">${p.marketSlug.slice(0,36)}${p.marketSlug.length > 36 ? '…' : ''}</td>
+          <td><span class="outcome-${p.outcome}">${p.outcome}</span></td>
+          <td class="mono">${Number(p.shares).toFixed(4)}</td>
+          <td class="mono">$${Number(p.entryPrice).toFixed(4)}</td>
+          <td class="mono">${p.currentPrice != null ? '$' + Number(p.currentPrice).toFixed(4) : '<span style="color:var(--dim)">—</span>'}</td>
+          <td>${pnlStr}</td>
+          <td style="color:var(--dim);font-size:11px">${new Date(p.openedAt).toLocaleString()}</td>
+        </tr>`;
+      }).join('');
+
+      // Update chart
+      const labels = positions.map(p => new Date(p.openedAt).toLocaleTimeString());
+      let cum = 0;
+      const vals = positions.map(p => { cum += (p.unrealizedPnl || 0); return parseFloat(cum.toFixed(4)); });
+      pnlChart.data.labels = labels;
+      pnlChart.data.datasets[0].data = vals;
+      pnlChart.update('none');
+    }
+  } catch {}
+}
+
+// ── Fetch Execution Log ───────────────────────────────────────────
+async function fetchLog() {
+  try {
+    const r = await fetch('/api/execution-log?limit=20');
+    const d = await r.json();
+    const tbody = document.getElementById('log-body');
+    if (!d.entries.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="9">No executions yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.entries.map(e => `<tr>
+      <td class="mono" style="color:var(--dim);font-size:11px">${new Date(e.executedAt).toLocaleTimeString()}</td>
+      <td style="color:var(--blue);font-weight:700">${e.action}</td>
+      <td class="mono" style="font-size:11px">${e.marketSlug.slice(0,30)}${e.marketSlug.length > 30 ? '…' : ''}</td>
+      <td><span class="outcome-${e.outcome}">${e.outcome}</span></td>
+      <td class="mono">$${Number(e.sizeUsdc).toFixed(2)}</td>
+      <td class="mono">${Number(e.price).toFixed(4)}</td>
+      <td style="color:var(--dim)">${e.mode}</td>
+      <td><span class="status status-${e.status}">${e.status}</span></td>
+      <td class="mono" style="font-size:10px;color:var(--dim);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.bullpenCommand || ''}">${e.bullpenCommand || '—'}</td>
+    </tr>`).join('');
+  } catch {}
+}
+
+// ── Preview Modal ─────────────────────────────────────────────────
+async function showPreview(id) {
+  try {
+    const r = await fetch(`/api/preview/${id}`);
+    const d = await r.json();
+    document.getElementById('modal-rows').innerHTML = [
+      ['Market', d.marketSlug],
+      ['Outcome', d.outcome],
+      ['Size', '$' + (d.sizeUsdc || 0).toFixed(2) + ' USDC'],
+      ['Implied Probability', ((d.impliedProbability || 0) * 100).toFixed(2) + '%'],
+      ['Estimated Shares', d.estimatedShares || '—'],
+      ['Execution Mode', d.executionMode],
+    ].map(([k, v]) => `<div class="modal-row"><span class="modal-key">${k}</span><span class="modal-val mono">${v}</span></div>`).join('');
+    document.getElementById('modal-cmd').textContent = d.command || '—';
+    document.getElementById('modal').classList.add('open');
+  } catch {}
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+}
+document.getElementById('modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
+
+// ── Kill Switch ───────────────────────────────────────────────────
+async function killSwitch() {
+  if (!confirm('⚠ KILL SWITCH\n\nThis will immediately stop all running strategies.\n\nProceed?')) return;
+  try {
+    await fetch('/api/kill-switch', { method: 'POST' });
+    alert('Kill switch activated. All strategies stopped. Refresh the page to see updated status.');
+  } catch { alert('Failed to reach server.'); }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────
+function setEl(id, text, cls) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  if (cls) el.className = el.className.replace(/\bval-\w+\b/g, '') + ' ' + cls;
+}
+
+function setChip(id, state, label) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = 'chip ' + (state === 'live' ? 'live' : state === 'up' ? 'up' : state === 'dry' ? 'dry' : state === 'warn' ? 'warn' : 'down');
+  el.innerHTML = `<span class="dot"></span>${label}`;
+}
+
+function confColor(score) {
+  if (!score) return 'var(--dim)';
+  if (score >= 0.8) return 'var(--green)';
+  if (score >= 0.5) return 'var(--yellow)';
+  return 'var(--red)';
+}
+
+// ── Poll Loop ─────────────────────────────────────────────────────
+async function refresh() {
+  await Promise.allSettled([fetchHealth(), fetchCandidates(), fetchPortfolio(), fetchLog()]);
+}
+
+function startCountdown() {
+  countdown = POLL_INTERVAL / 1000;
+  const el = document.getElementById('refresh-timer');
+  const tick = () => {
+    el.textContent = `Refresh in ${countdown}s`;
+    if (countdown > 0) { countdown--; setTimeout(tick, 1000); }
+  };
+  tick();
+}
+
+initChart();
+refresh();
+startCountdown();
+
+setInterval(() => {
+  refresh();
+  startCountdown();
+}, POLL_INTERVAL);
+</script>
+</body>
+</html>
