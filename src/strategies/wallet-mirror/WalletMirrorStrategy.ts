@@ -63,6 +63,12 @@ export class WalletMirrorStrategy extends BaseStrategy {
       txHash: tx.txHash,
     });
 
+    // Skip crypto price markets — we only want prediction/event markets
+    if (/^(btc|eth|sol|matic|bnb|xrp|doge|crypto)-/i.test(tx.marketSlug)) {
+      logger.debug('WalletMirror: skipping crypto market', { slug: tx.marketSlug });
+      return null;
+    }
+
     let currentAsk: number;
     let spread: number;
 

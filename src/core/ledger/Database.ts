@@ -188,6 +188,32 @@ export class Database {
       .run(currentPrice, id);
   }
 
+  getOpenSimulatedPositions(): Array<{
+    id: number; marketSlug: string; outcome: string;
+    shares: number; entryPrice: number; openedAt: string;
+  }> {
+    this.assertReady();
+    return this.db
+      .prepare(`
+        SELECT id, market_slug AS marketSlug, outcome, shares, entry_price AS entryPrice, opened_at AS openedAt
+        FROM positions WHERE status = 'SIMULATED_OPEN'
+        ORDER BY opened_at ASC
+      `)
+      .all() as Array<{ id: number; marketSlug: string; outcome: string; shares: number; entryPrice: number; openedAt: string }>;
+  }
+
+  closePosition(id: number, exitPrice: number, realizedPnl: number): void {
+    this.assertReady();
+    this.db
+      .prepare(`
+        UPDATE positions
+        SET status = 'SIMULATED_CLOSED', current_price = ?, realized_pnl = ?,
+            closed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE id = ?
+      `)
+      .run(exitPrice, realizedPnl, id);
+  }
+
   getSimulatedPortfolioSummary(): {
     openCount: number;
     totalCostBasis: number;
@@ -233,6 +259,62 @@ export class Database {
         shares: number; entryPrice: number; currentPrice: number | null;
         unrealizedPnl: number | null; openedAt: string;
       }>;
+  }
+
+  getAllClosedSimulatedPositions(limit = 50): Array<{
+    id: number; marketSlug: string; outcome: string; shares: number;
+    entryPrice: number; exitPrice: number | null; realizedPnl: number | null;
+    openedAt: string; closedAt: string | null;
+  }> {
+    this.assertReady();
+    return this.db
+      .prepare(`
+        SELECT id, market_slug AS marketSlug, outcome, shares,
+               entry_price AS entryPrice, current_price AS exitPrice,
+               realized_pnl AS realizedPnl, opened_at AS openedAt, closed_at AS closedAt
+        FROM positions WHERE status = 'SIMULATED_CLOSED'
+        ORDER BY closed_at DESC LIMIT ?
+      `)
+      .all(limit) as Array<{
+        id: number; marketSlug: string; outcome: string; shares: number;
+        entryPrice: number; exitPrice: number | null; realizedPnl: number | null;
+        openedAt: string; closedAt: string | null;
+      }>;
+  }
+
+  getPnlSummary(): {
+    realizedPnl: number; unrealizedPnl: number; totalPnl: number;
+    openCount: number; closedCount: number; winCount: number; lossCount: number;
+    winRate: number; openExposure: number;
+  } {
+    this.assertReady();
+    const closed = this.db.prepare(`
+      SELECT COALESCE(SUM(realized_pnl), 0) AS realizedPnl,
+             COUNT(*) AS closedCount,
+             COUNT(CASE WHEN realized_pnl > 0 THEN 1 END) AS winCount
+      FROM positions WHERE status = 'SIMULATED_CLOSED'
+    `).get() as { realizedPnl: number; closedCount: number; winCount: number };
+
+    const open = this.db.prepare(`
+      SELECT COUNT(*) AS openCount,
+             COALESCE(SUM(shares * entry_price), 0) AS openExposure,
+             COALESCE(SUM(CASE WHEN current_price IS NOT NULL
+               THEN (current_price - entry_price) * shares ELSE 0 END), 0) AS unrealizedPnl
+      FROM positions WHERE status = 'SIMULATED_OPEN'
+    `).get() as { openCount: number; openExposure: number; unrealizedPnl: number };
+
+    const lossCount = closed.closedCount - closed.winCount;
+    return {
+      realizedPnl: closed.realizedPnl,
+      unrealizedPnl: open.unrealizedPnl,
+      totalPnl: closed.realizedPnl + open.unrealizedPnl,
+      openCount: open.openCount,
+      closedCount: closed.closedCount,
+      winCount: closed.winCount,
+      lossCount,
+      winRate: closed.closedCount > 0 ? closed.winCount / closed.closedCount : 0,
+      openExposure: open.openExposure,
+    };
   }
 
   // ── Daily P&L ─────────────────────────────────────────────────────────────

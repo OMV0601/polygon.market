@@ -1,6 +1,6 @@
 import { env } from '../config/env';
 import { logger } from '../core/logger/logger';
-import { BullpenClient } from '../core/bullpen/BullpenClient';
+import { PolymarketClient } from '../core/polymarket/PolymarketClient';
 import { Database } from '../core/ledger/Database';
 import type { CandidatePayload, RiskDecision } from '../core/risk/types';
 import type { FillResult } from './types';
@@ -8,7 +8,7 @@ import type { FillResult } from './types';
 export class ExecutionEngine {
   constructor(
     private readonly db: Database,
-    private readonly bullpen: BullpenClient
+    private readonly bullpen: PolymarketClient
   ) {}
 
   async execute(candidate: CandidatePayload, decision: RiskDecision): Promise<FillResult> {

@@ -1,6 +1,6 @@
 import { logger } from '../../core/logger/logger';
 import { RiskManager } from '../../core/risk/RiskManager';
-import { BullpenClient } from '../../core/bullpen/BullpenClient';
+import { PolymarketClient } from '../../core/polymarket/PolymarketClient';
 import { Database } from '../../core/ledger/Database';
 import { ExecutionEngine } from '../../execution/ExecutionEngine';
 import type { CandidatePayload, StrategyModule } from '../../core/risk/types';
@@ -13,7 +13,7 @@ export abstract class BaseStrategy {
 
   constructor(
     protected readonly riskManager: RiskManager,
-    protected readonly bullpen: BullpenClient,
+    protected readonly bullpen: PolymarketClient,
     protected readonly db: Database,
     protected readonly executionEngine: ExecutionEngine
   ) {}

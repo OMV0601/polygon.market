@@ -1,7 +1,7 @@
 import { env } from '../../config/env';
 import { RISK } from '../../config/constants';
 import { logger } from '../logger/logger';
-import { BullpenClient } from '../bullpen/BullpenClient';
+import { PolymarketClient } from '../polymarket/PolymarketClient';
 import { Database } from '../ledger/Database';
 import type {
   CandidatePayload,
@@ -14,7 +14,7 @@ import type {
 export class RiskManager {
   constructor(
     private readonly db: Database,
-    private readonly bullpen: BullpenClient
+    private readonly bullpen: PolymarketClient
   ) {}
 
   // ── Entry point ────────────────────────────────────────────────────────────
@@ -156,8 +156,6 @@ export class RiskManager {
       };
     }
 
-    // In Phase 2 this will call bullpen.positions() for a live balance.
-    // For now, WALLET_BALANCE_USDC is the authoritative portfolio base.
     const maxSingleTrade = (env.MAX_POSITION_SIZE_PCT / 100) * env.WALLET_BALANCE_USDC;
 
     if (candidate.suggestedSize > maxSingleTrade) {
@@ -167,6 +165,18 @@ export class RiskManager {
           `Proposed size ${candidate.suggestedSize.toFixed(2)} USDC exceeds ` +
           `${env.MAX_POSITION_SIZE_PCT}% of wallet balance ${env.WALLET_BALANCE_USDC} USDC ` +
           `(max per trade: ${maxSingleTrade.toFixed(2)} USDC)`,
+      };
+    }
+
+    // Total portfolio cap: never let open exposure exceed the full bankroll
+    const totalOpenExposure = this.db.getTotalOpenExposureUsdc();
+    if (totalOpenExposure + candidate.suggestedSize > env.WALLET_BALANCE_USDC) {
+      return {
+        passed: false,
+        detail:
+          `Portfolio fully deployed: ${totalOpenExposure.toFixed(2)} USDC open + ` +
+          `${candidate.suggestedSize.toFixed(2)} USDC proposed exceeds bankroll ` +
+          `${env.WALLET_BALANCE_USDC} USDC`,
       };
     }
 
@@ -208,8 +218,8 @@ export class RiskManager {
     if (existing.length === 0) return { passed: true };
 
     const totalSizeInMarket = existing.reduce((sum, p) => sum + p.shares * p.entryPrice, 0);
-    const totalOpenExposure = this.db.getTotalOpenExposureUsdc();
-    const portfolioBase = totalOpenExposure || 1;
+    // Use wallet balance as denominator — not open exposure — so the % is meaningful
+    const portfolioBase = env.WALLET_BALANCE_USDC || 1;
     const marketExposurePct = (totalSizeInMarket / portfolioBase) * 100;
 
     if (marketExposurePct >= env.MAX_POSITION_SIZE_PCT) {

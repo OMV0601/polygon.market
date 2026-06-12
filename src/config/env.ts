@@ -46,9 +46,9 @@ const EnvSchema = z.object({
   RSS_FEED_URLS: z
     .string()
     .default(
-      'https://feeds.reuters.com/reuters/topNews,' +
       'https://feeds.bbci.co.uk/news/rss.xml,' +
-      'https://feeds.npr.org/1001/rss.xml'
+      'https://feeds.npr.org/1001/rss.xml,' +
+      'https://rss.nytimes.com/services/xml/rss/nyt/World.xml'
     )
     .transform((v) => v.split(',').map((u) => u.trim()).filter(Boolean)),
 });

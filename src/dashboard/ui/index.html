@@ -120,6 +120,15 @@
     }
     .preview-btn:hover { border-color: var(--blue); color: var(--blue); }
 
+    /* ── Performance scorecard ── */
+    .perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px,1fr)); gap: 12px; padding: 16px; }
+    .perf-stat { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+    .perf-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+    .perf-value { font-size: 20px; font-weight: 700; }
+    .perf-sub { font-size: 11px; color: var(--dim); margin-top: 2px; }
+    .perf-hero { grid-column: span 2; }
+    .perf-hero .perf-value { font-size: 28px; }
+
     /* ── Portfolio grid ── */
     .portfolio-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 20px; }
     @media (max-width: 900px) { .portfolio-grid { grid-template-columns: 1fr; } }
@@ -211,6 +220,46 @@
     </div>
   </div>
 
+  <!-- Performance Scorecard -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Performance</span>
+      <span style="color:var(--dim);font-size:11px;margin-left:auto;">Paper trading · $1,000 bankroll · updated every 15 min</span>
+    </div>
+    <div class="perf-grid">
+      <div class="perf-stat perf-hero">
+        <div class="perf-label">Total PnL (Realized + Unrealized)</div>
+        <div class="perf-value pnl-zero" id="perf-total">$0.00</div>
+        <div class="perf-sub" id="perf-total-sub">no closed trades yet</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-label">Realized PnL</div>
+        <div class="perf-value pnl-zero" id="perf-realized">$0.00</div>
+        <div class="perf-sub">from closed positions</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-label">Unrealized PnL</div>
+        <div class="perf-value pnl-zero" id="perf-unrealized">$0.00</div>
+        <div class="perf-sub">on open positions</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-label">Win Rate</div>
+        <div class="perf-value val-blue" id="perf-winrate">—</div>
+        <div class="perf-sub" id="perf-wl">0W / 0L</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-label">Open Positions</div>
+        <div class="perf-value" id="perf-open">0</div>
+        <div class="perf-sub" id="perf-exposure">$0.00 deployed</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-label">Bankroll Remaining</div>
+        <div class="perf-value val-blue" id="perf-bankroll">$1,000.00</div>
+        <div class="perf-sub">of $1,000 paper money</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Alpha Feed -->
   <div class="card">
     <div class="card-header">
@@ -276,6 +325,28 @@
         </thead>
         <tbody id="positions-body">
           <tr class="empty-row"><td colspan="7">No open positions yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Closed Trades -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Closed Trades</span>
+      <span class="card-badge" id="closed-count">0</span>
+      <span style="color:var(--dim);font-size:11px;margin-left:auto;">Resolved markets — actual realized PnL</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Closed At</th><th>Market</th><th>Outcome</th><th>Shares</th>
+            <th>Entry</th><th>Exit</th><th>Realized PnL</th><th>Result</th>
+          </tr>
+        </thead>
+        <tbody id="closed-body">
+          <tr class="empty-row"><td colspan="8">No closed trades yet — waiting for markets to resolve</td></tr>
         </tbody>
       </table>
     </div>
@@ -427,12 +498,53 @@ async function fetchCandidates() {
   } catch {}
 }
 
+// ── Fetch PnL Scorecard ───────────────────────────────────────────
+async function fetchPnl() {
+  try {
+    const r = await fetch('/api/pnl');
+    const d = await r.json();
+    const BANKROLL = 1000;
+
+    const fmt = (v) => (v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2);
+    const cls = (v) => 'perf-value ' + (v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : 'pnl-zero');
+
+    const totalEl = document.getElementById('perf-total');
+    totalEl.textContent = fmt(d.totalPnl);
+    totalEl.className = cls(d.totalPnl);
+    document.getElementById('perf-total-sub').textContent =
+      d.closedCount > 0
+        ? `${d.closedCount} trade${d.closedCount !== 1 ? 's' : ''} closed`
+        : 'no closed trades yet';
+
+    const realEl = document.getElementById('perf-realized');
+    realEl.textContent = fmt(d.realizedPnl);
+    realEl.className = cls(d.realizedPnl);
+
+    const unrlEl = document.getElementById('perf-unrealized');
+    unrlEl.textContent = fmt(d.unrealizedPnl);
+    unrlEl.className = cls(d.unrealizedPnl);
+
+    const wrEl = document.getElementById('perf-winrate');
+    wrEl.textContent = d.closedCount > 0 ? (d.winRate * 100).toFixed(1) + '%' : '—';
+    wrEl.className = 'perf-value ' + (d.winRate >= 0.5 ? 'val-up' : d.closedCount > 0 ? 'val-down' : 'val-blue');
+    document.getElementById('perf-wl').textContent = `${d.winCount}W / ${d.lossCount}L`;
+
+    document.getElementById('perf-open').textContent = d.openCount;
+    document.getElementById('perf-exposure').textContent = '$' + d.openExposure.toFixed(2) + ' deployed';
+
+    const remaining = Math.max(0, BANKROLL - d.openExposure);
+    const brEl = document.getElementById('perf-bankroll');
+    brEl.textContent = '$' + remaining.toFixed(2);
+    brEl.className = 'perf-value ' + (remaining > BANKROLL * 0.5 ? 'val-blue' : remaining > BANKROLL * 0.2 ? 'val-warn' : 'val-down');
+  } catch {}
+}
+
 // ── Fetch Portfolio ───────────────────────────────────────────────
 async function fetchPortfolio() {
   try {
     const r = await fetch('/api/portfolio');
     const d = await r.json();
-    const { summary, positions } = d;
+    const { summary, positions, closed } = d;
 
     setEl('pnl-basis', '$' + summary.totalCostBasis.toFixed(2));
     const pnlEl = document.getElementById('pnl-unrealized');
@@ -462,13 +574,37 @@ async function fetchPortfolio() {
         </tr>`;
       }).join('');
 
-      // Update chart
+      // Update chart — cumulative unrealized PnL across open positions
       const labels = positions.map(p => new Date(p.openedAt).toLocaleTimeString());
       let cum = 0;
       const vals = positions.map(p => { cum += (p.unrealizedPnl || 0); return parseFloat(cum.toFixed(4)); });
       pnlChart.data.labels = labels;
       pnlChart.data.datasets[0].data = vals;
       pnlChart.update('none');
+    }
+
+    // Closed trades table
+    const closedBody = document.getElementById('closed-body');
+    document.getElementById('closed-count').textContent = (closed || []).length;
+    if (!closed || closed.length === 0) {
+      closedBody.innerHTML = '<tr class="empty-row"><td colspan="8">No closed trades yet — waiting for markets to resolve</td></tr>';
+    } else {
+      closedBody.innerHTML = closed.map(t => {
+        const pnl = t.realizedPnl ?? 0;
+        const isWin = pnl > 0;
+        const pnlStr = `<span style="color:${isWin ? 'var(--green)' : 'var(--red)'}; font-weight:700">${(pnl >= 0 ? '+' : '')}$${Math.abs(pnl).toFixed(2)}</span>`;
+        const result = `<span class="status" style="background:${isWin ? '#0d2b0d' : '#2b0d0d'};color:${isWin ? 'var(--green)' : 'var(--red)'}">${isWin ? 'WIN' : 'LOSS'}</span>`;
+        return `<tr>
+          <td class="mono" style="color:var(--dim);font-size:11px">${t.closedAt ? new Date(t.closedAt).toLocaleString() : '—'}</td>
+          <td class="mono" style="font-size:11px" title="${t.marketSlug}">${t.marketSlug.slice(0,34)}${t.marketSlug.length > 34 ? '…' : ''}</td>
+          <td><span class="outcome-${t.outcome}">${t.outcome}</span></td>
+          <td class="mono">${Number(t.shares).toFixed(4)}</td>
+          <td class="mono">$${Number(t.entryPrice).toFixed(4)}</td>
+          <td class="mono">${t.exitPrice != null ? '$' + Number(t.exitPrice).toFixed(2) : '—'}</td>
+          <td>${pnlStr}</td>
+          <td>${result}</td>
+        </tr>`;
+      }).join('');
     }
   } catch {}
 }
@@ -553,7 +689,7 @@ function confColor(score) {
 
 // ── Poll Loop ─────────────────────────────────────────────────────
 async function refresh() {
-  await Promise.allSettled([fetchHealth(), fetchCandidates(), fetchPortfolio(), fetchLog()]);
+  await Promise.allSettled([fetchHealth(), fetchPnl(), fetchCandidates(), fetchPortfolio(), fetchLog()]);
 }
 
 function startCountdown() {

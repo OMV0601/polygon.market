@@ -1,9 +1,10 @@
 import { env } from './config/env';
 import { logger } from './core/logger/logger';
-import { BullpenClient } from './core/bullpen/BullpenClient';
+import { PolymarketClient } from './core/polymarket/PolymarketClient';
 import { Database } from './core/ledger/Database';
 import { RiskManager } from './core/risk/RiskManager';
 import { ExecutionEngine } from './execution/ExecutionEngine';
+import { PositionResolver } from './core/ledger/PositionResolver';
 import { DashboardServer } from './dashboard/server';
 import { WalletMirrorStrategy } from './strategies/wallet-mirror';
 import { WeatherStrategy } from './strategies/weather';
@@ -32,7 +33,7 @@ async function main(): Promise<void> {
   logger.info('✔ Database', dbHealth);
 
   // ── 2. Bullpen ──────────────────────────────────────────────────────────────
-  const bullpen = new BullpenClient();
+  const bullpen = new PolymarketClient();
   const bullpenHealth = await bullpen.healthCheck();
   db.logHealth({
     component: 'bullpen',
@@ -67,6 +68,10 @@ async function main(): Promise<void> {
   const executionEngine = new ExecutionEngine(db, bullpen);
   logger.info('✔ ExecutionEngine ready', { mode: 'DRY_RUN' });
 
+  const resolver = new PositionResolver(db);
+  resolver.start();
+  logger.info('✔ PositionResolver started — checks every 15 min');
+
   const strategies: BaseStrategy[] = [
     new WalletMirrorStrategy(riskManager, bullpen, db, executionEngine),
     new WeatherStrategy(riskManager, bullpen, db, executionEngine),
@@ -89,6 +94,7 @@ async function main(): Promise<void> {
   // ── 6. Graceful shutdown ────────────────────────────────────────────────────
   const shutdown = (signal: string) => {
     logger.info(`Shutdown signal received (${signal}) — stopping`);
+    resolver.stop();
     for (const strategy of strategies) strategy.stop();
     dashboard.stop();
     db.close();

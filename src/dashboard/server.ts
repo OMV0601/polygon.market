@@ -5,7 +5,7 @@ import http from 'http';
 import { env } from '../config/env';
 import { logger } from '../core/logger/logger';
 import { Database } from '../core/ledger/Database';
-import { BullpenClient } from '../core/bullpen/BullpenClient';
+import { PolymarketClient } from '../core/polymarket/PolymarketClient';
 
 const UI_DIR = path.resolve(process.cwd(), 'src', 'dashboard', 'ui');
 
@@ -15,7 +15,7 @@ export class DashboardServer {
 
   constructor(
     private readonly db: Database,
-    private readonly bullpen: BullpenClient,
+    private readonly bullpen: PolymarketClient,
     private readonly onKillSwitch: () => void
   ) {
     this.app.use(cors({ origin: /localhost/ }));
@@ -70,12 +70,22 @@ export class DashboardServer {
       }
     });
 
-    // Portfolio — simulated positions + PnL summary
+    // PnL scorecard — realized + unrealized + win rate
+    r.get('/pnl', (_req, res) => {
+      try {
+        res.json(this.db.getPnlSummary());
+      } catch (err) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    });
+
+    // Portfolio — open + closed simulated positions
     r.get('/portfolio', (_req, res) => {
       try {
         const summary = this.db.getSimulatedPortfolioSummary();
         const positions = this.db.getAllSimulatedPositions();
-        res.json({ summary, positions });
+        const closed = this.db.getAllClosedSimulatedPositions(30);
+        res.json({ summary, positions, closed });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });
       }
