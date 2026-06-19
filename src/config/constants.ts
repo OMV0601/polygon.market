@@ -17,6 +17,15 @@ export const RISK = {
   MAX_SMART_MONEY_PRICE_DELTA: 0.03,
   MAX_WALLET_MIRROR_SPREAD: 0.04,
 
+  // Module A — quality, concentration & pacing controls
+  MAX_EVENT_EXPOSURE_PCT: 10,             // max % of bankroll per underlying event
+  MAX_TRADES_PER_CYCLE: 4,                // pace deployment — no bankroll dumps
+  MIN_IMPLIED_PROBABILITY: 0.10,          // skip longshots / lottery tickets
+  MAX_IMPLIED_PROBABILITY: 0.90,          // skip capital-inefficient near-certainties
+  MIN_SMART_MONEY_CONVICTION_USDC: 100,   // wallet must bet >= this to signal conviction
+  SMART_MONEY_CONVICTION_REF_USDC: 1_000, // bet size that maps to full conviction score
+  WALLET_MIRROR_BASE_SIZE_FRACTION: 0.5,  // floor fraction of max per-trade size
+
   // Module B
   MAX_WEATHER_HORIZON_HOURS: 72,
   MAX_FORECAST_STALENESS_HOURS: 1,

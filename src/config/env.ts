@@ -28,6 +28,10 @@ const EnvSchema = z.object({
   // Set to your actual USDC balance. 0 = skip the per-trade exposure check.
   WALLET_BALANCE_USDC: z.coerce.number().min(0).default(0),
 
+  // Max capital the bot may deploy into new positions per calendar day (UTC).
+  // 0 = no daily cap. Drip-feeds the bankroll instead of deploying it at once.
+  MAX_DAILY_DEPLOYMENT_USDC: z.coerce.number().min(0).default(100),
+
   TRACKED_WALLETS: z
     .string()
     .optional()

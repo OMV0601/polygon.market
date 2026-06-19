@@ -152,6 +152,21 @@ export class Database {
     return row.total;
   }
 
+  // Open exposure across all markets sharing an event prefix (e.g. all bets on
+  // the same match). Used to cap per-event concentration.
+  getOpenExposureByEventPrefix(prefix: string): number {
+    this.assertReady();
+    const row = this.db
+      .prepare(`
+        SELECT COALESCE(SUM(shares * entry_price), 0) AS total
+        FROM positions
+        WHERE status IN ('OPEN', 'SIMULATED_OPEN')
+          AND market_slug LIKE ? || '%'
+      `)
+      .get(prefix) as { total: number };
+    return row.total;
+  }
+
   // ── Position management ───────────────────────────────────────────────────
 
   insertPosition(position: {
@@ -318,6 +333,20 @@ export class Database {
   }
 
   // ── Daily P&L ─────────────────────────────────────────────────────────────
+
+  // Total capital (cost basis) deployed into NEW positions opened today (UTC).
+  getDailyDeployedUsdc(): number {
+    this.assertReady();
+    const row = this.db
+      .prepare(`
+        SELECT COALESCE(SUM(shares * entry_price), 0) AS total
+        FROM positions
+        WHERE DATE(opened_at) = DATE('now')
+          AND status IN ('OPEN', 'CLOSED', 'SIMULATED_OPEN', 'SIMULATED_CLOSED')
+      `)
+      .get() as { total: number };
+    return row.total;
+  }
 
   getDailyRealizedPnl(): number {
     this.assertReady();

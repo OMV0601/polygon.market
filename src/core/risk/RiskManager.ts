@@ -1,6 +1,7 @@
 import { env } from '../../config/env';
 import { RISK } from '../../config/constants';
 import { logger } from '../logger/logger';
+import { eventKey } from '../../lib/markets';
 import { PolymarketClient } from '../polymarket/PolymarketClient';
 import { Database } from '../ledger/Database';
 import type {
@@ -35,6 +36,8 @@ export class RiskManager {
       () => this.checkLiquidity(candidate),
       () => this.checkVolume(candidate),
       () => this.checkExposureLimit(candidate),
+      () => this.checkDailyDeploymentLimit(candidate),
+      () => this.checkEventConcentration(candidate),
       () => this.checkDailyLossLimit(),
       () => this.checkDuplicatePosition(candidate),
     ];
@@ -183,6 +186,63 @@ export class RiskManager {
     return { passed: true };
   }
 
+  // Drip-feed control: caps how much new capital can be deployed per day so the
+  // bot can't empty the bankroll in a single burst.
+  private checkDailyDeploymentLimit(candidate: CandidatePayload): CheckResult {
+    if (env.MAX_DAILY_DEPLOYMENT_USDC === 0) return { passed: true };
+
+    const deployedToday = this.db.getDailyDeployedUsdc();
+
+    if (deployedToday + candidate.suggestedSize > env.MAX_DAILY_DEPLOYMENT_USDC) {
+      return {
+        passed: false,
+        detail:
+          `Daily deployment limit reached: ${deployedToday.toFixed(2)} USDC already deployed today + ` +
+          `${candidate.suggestedSize.toFixed(2)} USDC proposed exceeds daily cap ` +
+          `${env.MAX_DAILY_DEPLOYMENT_USDC} USDC. Resets at 00:00 UTC.`,
+      };
+    }
+
+    if (deployedToday > env.MAX_DAILY_DEPLOYMENT_USDC * 0.8) {
+      return {
+        passed: true,
+        warning: `Daily deployment at ${((deployedToday / env.MAX_DAILY_DEPLOYMENT_USDC) * 100).toFixed(0)}% of the ${env.MAX_DAILY_DEPLOYMENT_USDC} USDC cap`,
+      };
+    }
+
+    return { passed: true };
+  }
+
+  // Caps how much capital can sit on any single underlying event (e.g. all the
+  // different bets on one match). Prevents the bankroll from concentrating into
+  // a handful of correlated markets.
+  private checkEventConcentration(candidate: CandidatePayload): CheckResult {
+    if (env.WALLET_BALANCE_USDC === 0) return { passed: true };
+
+    const key = eventKey(candidate.marketSlug);
+    const eventExposure = this.db.getOpenExposureByEventPrefix(key);
+    const maxEventExposure = (RISK.MAX_EVENT_EXPOSURE_PCT / 100) * env.WALLET_BALANCE_USDC;
+
+    if (eventExposure + candidate.suggestedSize > maxEventExposure) {
+      return {
+        passed: false,
+        detail:
+          `Event concentration limit: ${eventExposure.toFixed(2)} USDC already open on ` +
+          `'${key}' + ${candidate.suggestedSize.toFixed(2)} USDC proposed exceeds ` +
+          `${RISK.MAX_EVENT_EXPOSURE_PCT}% cap (${maxEventExposure.toFixed(2)} USDC)`,
+      };
+    }
+
+    if (eventExposure > maxEventExposure * 0.7) {
+      return {
+        passed: true,
+        warning: `Event '${key}' at ${((eventExposure / maxEventExposure) * 100).toFixed(0)}% of its concentration cap`,
+      };
+    }
+
+    return { passed: true };
+  }
+
   private checkDailyLossLimit(): CheckResult {
     const dailyPnl = this.db.getDailyRealizedPnl();
 
@@ -289,9 +349,11 @@ export class RiskManager {
     const d = detail.toLowerCase();
     if (d.includes('spread')) return 'SPREAD_CEILING_EXCEEDED';
     if (d.includes('liquidity')) return 'LIQUIDITY_FLOOR_FAILED';
-    if (d.includes('exposure')) return 'EXPOSURE_LIMIT_EXCEEDED';
-    if (d.includes('daily loss')) return 'DAILY_LOSS_LIMIT_REACHED';
+    if (d.includes('concentration')) return 'EVENT_CONCENTRATION_LIMIT';
+    if (d.includes('daily deployment')) return 'DAILY_DEPLOYMENT_LIMIT_REACHED';
     if (d.includes('maximum exposure')) return 'DUPLICATE_MAX_POSITION';
+    if (d.includes('exposure') || d.includes('deployed')) return 'EXPOSURE_LIMIT_EXCEEDED';
+    if (d.includes('daily loss')) return 'DAILY_LOSS_LIMIT_REACHED';
     if (d.includes('volume')) return 'INSUFFICIENT_VOLUME_24H';
     return 'SPREAD_CEILING_EXCEEDED'; // safe fallback
   }

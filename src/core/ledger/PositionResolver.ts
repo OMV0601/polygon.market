@@ -87,7 +87,7 @@ export class PositionResolver {
             pnl: slugPositions
               .map((p) => {
                 const win = p.outcome.toLowerCase() === winnerLabel;
-                return (win ? 1.0 : 0.0 - p.entryPrice) * p.shares;
+                return ((win ? 1.0 : 0.0) - p.entryPrice) * p.shares;
               })
               .reduce((a, b) => a + b, 0)
               .toFixed(4),
@@ -133,10 +133,15 @@ export class PositionResolver {
   }
 
   private async fetchMarket(slug: string): Promise<GammaResolution | null> {
-    const { data } = await httpGet<GammaResolution[]>(
-      `${GAMMA}/markets?slug=${encodeURIComponent(slug)}&limit=1`
-    );
-    return data?.[0] ?? null;
+    const s = encodeURIComponent(slug);
+    // The default Gamma query only returns ACTIVE markets. Once a market
+    // resolves it disappears from that query and must be fetched with
+    // closed=true. Try active first (price updates), then closed (resolution).
+    const active = await httpGet<GammaResolution[]>(`${GAMMA}/markets?slug=${s}&limit=1`);
+    if (active.data?.[0]) return active.data[0];
+
+    const closed = await httpGet<GammaResolution[]>(`${GAMMA}/markets?slug=${s}&closed=true&limit=1`);
+    return closed.data?.[0] ?? null;
   }
 }
 

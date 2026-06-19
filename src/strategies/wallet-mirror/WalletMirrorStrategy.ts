@@ -2,6 +2,7 @@ import { BaseStrategy } from '../base/BaseStrategy';
 import { env } from '../../config/env';
 import { STRATEGY_INTERVALS, RISK } from '../../config/constants';
 import { logger } from '../../core/logger/logger';
+import { isLowQualityMarket } from '../../lib/markets';
 import type { BullpenWalletTransaction } from '../../core/bullpen/types';
 import type { CandidatePayload, Outcome, StrategyModule } from '../../core/risk/types';
 
@@ -36,7 +37,20 @@ export class WalletMirrorStrategy extends BaseStrategy {
       }
     }
 
-    return candidates;
+    // Pace deployment: act only on the highest-confidence signals each cycle so
+    // a burst of smart-money activity can't empty the bankroll in one pass.
+    candidates.sort((a, b) => b.confidenceScore - a.confidenceScore);
+    const selected = candidates.slice(0, RISK.MAX_TRADES_PER_CYCLE);
+
+    if (candidates.length > selected.length) {
+      logger.info('WalletMirror: pacing — deferring lower-confidence signals', {
+        observed: candidates.length,
+        selected: selected.length,
+        cap: RISK.MAX_TRADES_PER_CYCLE,
+      });
+    }
+
+    return selected;
   }
 
   private filterUnseen(txs: BullpenWalletTransaction[], address: string): BullpenWalletTransaction[] {
@@ -50,7 +64,7 @@ export class WalletMirrorStrategy extends BaseStrategy {
     tx: BullpenWalletTransaction,
     address: string
   ): Promise<CandidatePayload | null> {
-    // Persist the transaction so it's never re-evaluated
+    // Persist the transaction so it's never re-evaluated, even if we skip it.
     this.db.insertWalletTx({
       walletAddress: address,
       walletAlias: this.alias(address),
@@ -63,9 +77,21 @@ export class WalletMirrorStrategy extends BaseStrategy {
       txHash: tx.txHash,
     });
 
-    // Skip crypto price markets — we only want prediction/event markets
-    if (/^(btc|eth|sol|matic|bnb|xrp|doge|crypto)-/i.test(tx.marketSlug)) {
-      logger.debug('WalletMirror: skipping crypto market', { slug: tx.marketSlug });
+    // ── Quality gate 1: market type ──────────────────────────────────────────
+    // Skip crypto price markets and structural longshots (exact scores, halves).
+    if (isLowQualityMarket(tx.marketSlug)) {
+      logger.debug('WalletMirror: skipping low-quality market', { slug: tx.marketSlug });
+      return null;
+    }
+
+    // ── Quality gate 2: smart-money conviction ───────────────────────────────
+    // Only follow bets the wallet actually committed to — ignore dust trades.
+    if (tx.totalCost < RISK.MIN_SMART_MONEY_CONVICTION_USDC) {
+      logger.debug('WalletMirror: smart-money bet below conviction floor — skipping', {
+        slug: tx.marketSlug,
+        betUsdc: tx.totalCost.toFixed(2),
+        floor: RISK.MIN_SMART_MONEY_CONVICTION_USDC,
+      });
       return null;
     }
 
@@ -78,6 +104,17 @@ export class WalletMirrorStrategy extends BaseStrategy {
       spread = book.bestAsk - book.bestBid;
     } catch {
       logger.warn('WalletMirror: orderbook unavailable, skipping candidate', { slug: tx.marketSlug });
+      return null;
+    }
+
+    // ── Quality gate 3: probability band ─────────────────────────────────────
+    // Skip lottery-ticket longshots and capital-inefficient near-certainties.
+    if (currentAsk < RISK.MIN_IMPLIED_PROBABILITY || currentAsk > RISK.MAX_IMPLIED_PROBABILITY) {
+      logger.debug('WalletMirror: outside probability band — skipping', {
+        slug: tx.marketSlug,
+        impliedProb: currentAsk.toFixed(3),
+        band: `${RISK.MIN_IMPLIED_PROBABILITY}-${RISK.MAX_IMPLIED_PROBABILITY}`,
+      });
       return null;
     }
 
@@ -103,8 +140,7 @@ export class WalletMirrorStrategy extends BaseStrategy {
       return null;
     }
 
-    // Confidence scales inversely with delta — tighter fill = higher confidence
-    const confidenceScore = Math.max(0.1, 1 - delta / RISK.MAX_SMART_MONEY_PRICE_DELTA);
+    const confidenceScore = this.confidence(delta, spread, tx.totalCost);
     const suggestedSize = this.size(confidenceScore);
 
     return {
@@ -117,6 +153,7 @@ export class WalletMirrorStrategy extends BaseStrategy {
         currentAsk,
         delta,
         spread,
+        smartMoneyBetUsdc: tx.totalCost,
         txHash: tx.txHash,
         txTimestamp: tx.timestamp,
         walletAlias: this.alias(address),
@@ -128,13 +165,33 @@ export class WalletMirrorStrategy extends BaseStrategy {
     };
   }
 
+  // Composite confidence in [0.1, 1]: how closely we can still follow the
+  // smart-money fill (freshness), how tight the book is (tightness), and how
+  // much conviction the wallet showed (size of their bet).
+  private confidence(delta: number, spread: number, smartMoneyBetUsdc: number): number {
+    const freshness  = 1 - clamp01(delta / RISK.MAX_SMART_MONEY_PRICE_DELTA);
+    const tightness  = 1 - clamp01(spread / RISK.MAX_WALLET_MIRROR_SPREAD);
+    const conviction = clamp01(smartMoneyBetUsdc / RISK.SMART_MONEY_CONVICTION_REF_USDC);
+
+    const score = 0.5 * freshness + 0.2 * tightness + 0.3 * conviction;
+    return Math.max(0.1, Math.min(1, score));
+  }
+
   private alias(address: string): string {
     return `wallet_${address.replace(/^0x/i, '').slice(0, 6)}`;
   }
 
+  // Size scales from a floor fraction of the per-trade cap up to the full cap as
+  // confidence rises — so weak signals stake less and capital spreads further.
   private size(confidence: number): number {
     if (env.WALLET_BALANCE_USDC === 0) return 10;
-    const base = (env.MAX_POSITION_SIZE_PCT / 100) * env.WALLET_BALANCE_USDC;
-    return Math.round(base * confidence * 100) / 100;
+    const maxPerTrade = (env.MAX_POSITION_SIZE_PCT / 100) * env.WALLET_BALANCE_USDC;
+    const floor = maxPerTrade * RISK.WALLET_MIRROR_BASE_SIZE_FRACTION;
+    const sized = floor + (maxPerTrade - floor) * confidence;
+    return Math.round(sized * 100) / 100;
   }
+}
+
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
 }
