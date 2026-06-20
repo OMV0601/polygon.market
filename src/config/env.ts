@@ -46,6 +46,15 @@ const EnvSchema = z.object({
 
   ANTHROPIC_API_KEY: z.string().optional(),
 
+  // ─── Daily email report (optional) ──────────────────────────────────────────
+  // Gmail address that sends the report, plus a Google "app password".
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  // Who receives the report. Defaults to SMTP_USER if left blank.
+  REPORT_EMAIL_TO: z.string().optional(),
+  // Hour of day (UTC, 0–23) to send the daily summary.
+  REPORT_HOUR_UTC: z.coerce.number().int().min(0).max(23).default(23),
+
   // Comma-separated RSS feed URLs for Module C
   RSS_FEED_URLS: z
     .string()

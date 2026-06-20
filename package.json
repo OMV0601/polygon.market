@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx --no-warnings src/index.ts",
     "validate": "tsx --no-warnings src/index.ts --validate-only",
+    "report": "tsx --no-warnings src/index.ts --send-report",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
@@ -14,6 +15,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "nodemailer": "^6.9.14",
     "rss-parser": "^3.13.0",
     "winston": "^3.13.0",
     "zod": "^3.23.8"
@@ -22,6 +24,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^24.0.0",
+    "@types/nodemailer": "^6.4.15",
     "tsx": "^4.16.2",
     "typescript": "^5.5.3"
   },

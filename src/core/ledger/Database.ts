@@ -334,6 +334,41 @@ export class Database {
 
   // ── Daily P&L ─────────────────────────────────────────────────────────────
 
+  // Positions opened today (UTC) — for the daily email report.
+  getPositionsOpenedToday(): Array<{
+    marketSlug: string; outcome: string; shares: number; entryPrice: number;
+  }> {
+    this.assertReady();
+    return this.db
+      .prepare(`
+        SELECT market_slug AS marketSlug, outcome, shares, entry_price AS entryPrice
+        FROM positions
+        WHERE DATE(opened_at) = DATE('now') AND status LIKE 'SIMULATED%'
+        ORDER BY opened_at DESC
+      `)
+      .all() as Array<{ marketSlug: string; outcome: string; shares: number; entryPrice: number }>;
+  }
+
+  // Positions that resolved today (UTC), with win/loss result — for the report.
+  getPositionsClosedToday(): Array<{
+    marketSlug: string; outcome: string; shares: number;
+    entryPrice: number; exitPrice: number | null; realizedPnl: number | null;
+  }> {
+    this.assertReady();
+    return this.db
+      .prepare(`
+        SELECT market_slug AS marketSlug, outcome, shares,
+               entry_price AS entryPrice, current_price AS exitPrice, realized_pnl AS realizedPnl
+        FROM positions
+        WHERE DATE(closed_at) = DATE('now') AND status = 'SIMULATED_CLOSED'
+        ORDER BY closed_at DESC
+      `)
+      .all() as Array<{
+        marketSlug: string; outcome: string; shares: number;
+        entryPrice: number; exitPrice: number | null; realizedPnl: number | null;
+      }>;
+  }
+
   // Total capital (cost basis) deployed into NEW positions opened today (UTC).
   getDailyDeployedUsdc(): number {
     this.assertReady();

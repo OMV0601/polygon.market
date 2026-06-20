@@ -5,6 +5,7 @@ import { Database } from './core/ledger/Database';
 import { RiskManager } from './core/risk/RiskManager';
 import { ExecutionEngine } from './execution/ExecutionEngine';
 import { PositionResolver } from './core/ledger/PositionResolver';
+import { DailyReport } from './core/reporting/DailyReport';
 import { DashboardServer } from './dashboard/server';
 import { WalletMirrorStrategy } from './strategies/wallet-mirror';
 import { WeatherStrategy } from './strategies/weather';
@@ -13,6 +14,7 @@ import { CorrelationArbStrategy } from './strategies/correlation-arb';
 import type { BaseStrategy } from './strategies/base/BaseStrategy';
 
 const VALIDATE_ONLY = process.argv.includes('--validate-only');
+const SEND_REPORT_NOW = process.argv.includes('--send-report');
 
 async function main(): Promise<void> {
   logger.info('═══ polygon.market — Orchestrator ═══', { mode: VALIDATE_ONLY ? 'validate' : 'run' });
@@ -31,6 +33,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   logger.info('✔ Database', dbHealth);
+
+  // One-off: send the daily email report now, then exit (for `npm run report`).
+  if (SEND_REPORT_NOW) {
+    logger.info('Sending daily report on demand…');
+    await new DailyReport(db).sendReport();
+    logger.info('Daily report sent.');
+    db.close();
+    process.exit(0);
+  }
 
   // ── 2. Bullpen ──────────────────────────────────────────────────────────────
   const bullpen = new PolymarketClient();
@@ -72,6 +83,9 @@ async function main(): Promise<void> {
   resolver.start();
   logger.info('✔ PositionResolver started — checks every 15 min');
 
+  const dailyReport = new DailyReport(db);
+  dailyReport.start();
+
   const strategies: BaseStrategy[] = [
     new WalletMirrorStrategy(riskManager, bullpen, db, executionEngine),
     new WeatherStrategy(riskManager, bullpen, db, executionEngine),
@@ -95,6 +109,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: string) => {
     logger.info(`Shutdown signal received (${signal}) — stopping`);
     resolver.stop();
+    dailyReport.stop();
     for (const strategy of strategies) strategy.stop();
     dashboard.stop();
     db.close();
