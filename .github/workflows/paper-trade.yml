@@ -44,8 +44,13 @@ jobs:
 
       - name: Run one cycle
         env:
-          WALLET_BALANCE_USDC: '50'
-          MAX_DAILY_DEPLOYMENT_USDC: '20'
+          # Sized to match the intended real bankroll so the paper record
+          # reflects position sizes that would actually be traded. At $500 the
+          # 5% per-trade cap is $25, and the 3% per-event cap is $15.
+          WALLET_BALANCE_USDC: '500'
+          # Roughly 30% of bankroll a day, so a single bad forecast day cannot
+          # deploy the whole book before any of it has resolved.
+          MAX_DAILY_DEPLOYMENT_USDC: '150'
           LIVE_EXECUTION_ENABLED: 'false'
           LOG_LEVEL: info
         run: npm start -- --once
