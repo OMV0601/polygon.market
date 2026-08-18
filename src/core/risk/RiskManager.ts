@@ -138,15 +138,29 @@ export class RiskManager {
   private checkVolume(candidate: CandidatePayload): CheckResult {
     // Candidates should populate externalSignalData.volume24h from the discovery scan.
     const volume = candidate.externalSignalData?.volume24h as number | undefined;
+    const floor = this.volumeFloorFor(candidate.strategyModule);
 
-    if (volume != null && volume < RISK.MIN_VOLUME_24H_USDC) {
+    if (volume != null && volume < floor) {
       return {
         passed: false,
-        detail: `24h volume ${volume.toFixed(0)} USDC is below minimum ${RISK.MIN_VOLUME_24H_USDC} USDC`,
+        detail: `24h volume ${volume.toFixed(0)} USDC is below minimum ${floor} USDC`,
       };
     }
 
     return { passed: true };
+  }
+
+  /**
+   * The $10k floor exists so wallet-mirror only copies trades in markets deep
+   * enough that a whale's fill isn't the whole book. Temperature markets run a
+   * median of about $3k a day and every one of them clears $1k, so applying the
+   * wallet-mirror floor to them rejected every weather candidate. Depth at our
+   * position sizes is checked separately by checkLiquidity.
+   */
+  private volumeFloorFor(strategy: string): number {
+    return strategy === 'WEATHER'
+      ? RISK.WEATHER_MIN_VOLUME_24H_USDC
+      : RISK.MIN_VOLUME_24H_USDC;
   }
 
   private checkExposureLimit(candidate: CandidatePayload): CheckResult {
@@ -247,10 +261,19 @@ export class RiskManager {
     const dailyPnl = this.db.getDailyRealizedPnl();
 
     if (dailyPnl < 0) {
-      const totalOpenExposure = this.db.getTotalOpenExposureUsdc();
-      // Approximate portfolio value: open exposure + any realized gains/losses today
-      const portfolioBase = totalOpenExposure || 1;
-      const lossPct = (Math.abs(dailyPnl) / portfolioBase) * 100;
+      // The denominator must be a fixed base. Using open exposure meant it
+      // shrank every time a losing position closed — the same event that grows
+      // the numerator — so one bad day could report a 3000% drawdown and
+      // freeze the bot permanently.
+      if (env.WALLET_BALANCE_USDC <= 0) {
+        return {
+          passed: true,
+          warning:
+            'Daily loss limit skipped: set WALLET_BALANCE_USDC in .env to give drawdown a denominator',
+        };
+      }
+
+      const lossPct = (Math.abs(dailyPnl) / env.WALLET_BALANCE_USDC) * 100;
 
       if (lossPct >= env.MAX_DAILY_LOSS_PCT) {
         return {

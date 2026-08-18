@@ -35,6 +35,15 @@ export abstract class BaseStrategy {
     }
   }
 
+  /**
+   * Runs a single scan/evaluate/execute cycle and resolves when it is done.
+   * `start()` fires the same cycle on a timer; this is for one-shot runs such
+   * as a scheduled CI job, where there is no long-lived process to hold timers.
+   */
+  async runOnce(): Promise<void> {
+    await this.runCycle();
+  }
+
   private async runCycle(): Promise<void> {
     const cycleStart = Date.now();
     logger.info(`Strategy ${this.name}: scan cycle started`);

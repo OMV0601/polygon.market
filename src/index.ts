@@ -15,6 +15,9 @@ import type { BaseStrategy } from './strategies/base/BaseStrategy';
 
 const VALIDATE_ONLY = process.argv.includes('--validate-only');
 const SEND_REPORT_NOW = process.argv.includes('--send-report');
+// One-shot mode: run a single cycle of everything, then exit. Lets a scheduled
+// job (GitHub Actions, cron) drive the bot without a long-lived process.
+const RUN_ONCE = process.argv.includes('--once');
 
 async function main(): Promise<void> {
   logger.info('═══ polygon.market — Orchestrator ═══', { mode: VALIDATE_ONLY ? 'validate' : 'run' });
@@ -35,7 +38,9 @@ async function main(): Promise<void> {
   logger.info('✔ Database', dbHealth);
 
   // One-off: send the daily email report now, then exit (for `npm run report`).
-  if (SEND_REPORT_NOW) {
+  // With --once the report is sent after the cycle instead, so the email
+  // reflects the trades that run just made.
+  if (SEND_REPORT_NOW && !RUN_ONCE) {
     logger.info('Sending daily report on demand…');
     await new DailyReport(db).sendReport();
     logger.info('Daily report sent.');
@@ -80,18 +85,48 @@ async function main(): Promise<void> {
   logger.info('✔ ExecutionEngine ready', { mode: 'DRY_RUN' });
 
   const resolver = new PositionResolver(db);
-  resolver.start();
-  logger.info('✔ PositionResolver started — checks every 15 min');
-
-  const dailyReport = new DailyReport(db);
-  dailyReport.start();
 
   const strategies: BaseStrategy[] = [
     new WalletMirrorStrategy(riskManager, bullpen, db, executionEngine),
     new WeatherStrategy(riskManager, bullpen, db, executionEngine),
     new NewsCatalystStrategy(riskManager, bullpen, db, executionEngine),
-    new CorrelationArbStrategy(riskManager, bullpen, db, executionEngine),
+    // CorrelationArbStrategy is disabled: its margin formula, |1 - (priceA +
+    // priceB)|, assumes an antonym pair is exhaustive. Live markets break that
+    // — it paired "Fed increase 50bps" with "Fed decrease 50bps" and reported a
+    // 99.3% arb, when the Fed holding rates makes both legs lose. It bought a
+    // 0.4c lottery ticket on the strength of it. Real risk-free arb needs the
+    // outcomes of a single event, which the temperature bucket series now
+    // gives us; revisit it there rather than by tuning entity matching.
   ];
+
+  // One-shot: resolve, scan once, optionally mail the summary, then exit.
+  if (RUN_ONCE) {
+    logger.info('Running single cycle (--once)');
+
+    await resolver.run();
+
+    for (const strategy of strategies) {
+      await strategy.runOnce();
+    }
+
+    if (SEND_REPORT_NOW) await new DailyReport(db).sendReport();
+
+    const summary = db.getPnlSummary();
+    logger.info('Single cycle complete', {
+      openPositions: summary.openCount,
+      closedPositions: summary.closedCount,
+      totalPnl: summary.totalPnl.toFixed(2),
+    });
+
+    db.close();
+    process.exit(0);
+  }
+
+  resolver.start();
+  logger.info('✔ PositionResolver started — checks every 15 min');
+
+  const dailyReport = new DailyReport(db);
+  dailyReport.start();
 
   for (const strategy of strategies) strategy.start();
 

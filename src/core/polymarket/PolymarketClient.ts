@@ -103,12 +103,14 @@ export class PolymarketClient {
 
   // ── Market Discovery ──────────────────────────────────────────────
 
-  async discover(filters?: { category?: string; minVolume?: number }): Promise<BullpenDiscoverResult> {
-    const { data: raw, fetchedAt } = await httpGet<GammaMarket[]>(
-      `${GAMMA}/markets?active=true&closed=false&limit=100`
-    );
+  async discover(filters?: {
+    category?: string;
+    minVolume?: number;
+    maxMarkets?: number;
+  }): Promise<BullpenDiscoverResult> {
+    const { markets: raw, fetchedAt } = await this.fetchMarketPages(filters?.maxMarkets ?? 2_000);
 
-    let markets = raw ?? [];
+    let markets = raw;
 
     if (filters?.minVolume) {
       markets = markets.filter((m) => m.volume24hr >= filters.minVolume!);
@@ -244,6 +246,57 @@ export class PolymarketClient {
   }
 
   // ── Private helpers ───────────────────────────────────────────────
+
+  /**
+   * Walks Gamma's market list, highest 24h volume first.
+   *
+   * Gamma caps a page at 100 regardless of the requested limit and returns 422
+   * past a maximum offset, so a single unsorted limit=100 call — what this used
+   * to do — surfaced an arbitrary slice containing roughly 9 of the 100 most
+   * liquid markets. Hitting the offset ceiling is a normal end of walk, not an
+   * error, so whatever has been collected is kept.
+   */
+  private async fetchMarketPages(
+    maxMarkets: number
+  ): Promise<{ markets: GammaMarket[]; fetchedAt: Date }> {
+    const PAGE = 100;
+    const markets: GammaMarket[] = [];
+    const seen = new Set<string>();
+    let fetchedAt = new Date();
+
+    for (let offset = 0; markets.length < maxMarkets; offset += PAGE) {
+      let page: GammaMarket[] | undefined;
+
+      try {
+        const res = await httpGet<GammaMarket[]>(
+          `${GAMMA}/markets?active=true&closed=false&limit=${PAGE}&offset=${offset}` +
+            `&order=volume24hr&ascending=false`
+        );
+        page = res.data;
+        fetchedAt = res.fetchedAt;
+      } catch (err) {
+        if (offset === 0) throw err;
+        logger.debug('PolymarketClient: pagination stopped', {
+          offset,
+          collected: markets.length,
+          reason: (err as Error).message,
+        });
+        break;
+      }
+
+      if (!page?.length) break;
+
+      // Guard against an API that ignores offset and replays the first page.
+      const fresh = page.filter((m) => !seen.has(m.slug));
+      if (fresh.length === 0) break;
+      fresh.forEach((m) => seen.add(m.slug));
+      markets.push(...fresh);
+
+      if (page.length < PAGE) break;
+    }
+
+    return { markets: markets.slice(0, maxMarkets), fetchedAt };
+  }
 
   private async resolveTokenId(marketSlug: string, outcome: string): Promise<string> {
     if (!tokenCache.has(marketSlug)) {
