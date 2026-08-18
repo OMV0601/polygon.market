@@ -1,7 +1,20 @@
 // SQLite DDL. Run in order — each table depends only on prior ones.
 // Never ALTER TABLE here; add new migration functions in Database.ts instead.
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
+
+/**
+ * Columns added to existing tables after v1. The DDL above uses
+ * CREATE TABLE IF NOT EXISTS, which is a no-op on a database that already has
+ * the table, so additive changes must also be listed here to reach older files.
+ */
+export const ADDITIVE_COLUMNS: Array<{ table: string; column: string; type: string }> = [
+  { table: 'positions', column: 'mid_price', type: 'REAL' },
+  { table: 'positions', column: 'best_ask', type: 'REAL' },
+  { table: 'positions', column: 'slippage', type: 'REAL' },
+  { table: 'positions', column: 'fee_paid', type: 'REAL' },
+  { table: 'positions', column: 'cost_usdc', type: 'REAL' },
+];
 
 export const DDL: string[] = [
   // ── Schema versioning ──────────────────────────────────────────────────────
@@ -55,9 +68,16 @@ export const DDL: string[] = [
     market_slug     TEXT    NOT NULL,
     outcome         TEXT    NOT NULL,
     shares          REAL    NOT NULL,
-    entry_price     REAL    NOT NULL,
+    entry_price     REAL    NOT NULL,   -- avg price actually paid, incl. slippage
     current_price   REAL,
     realized_pnl    REAL,
+    -- Fill realism (schema v3). Recorded so a paper track record can be judged
+    -- against what execution would really have cost.
+    mid_price       REAL,               -- mid at entry; what the old model filled at
+    best_ask        REAL,               -- top of book at entry
+    slippage        REAL,               -- entry_price - best_ask
+    fee_paid        REAL,               -- USDC fee charged on entry
+    cost_usdc       REAL,               -- total outlay incl. fee
     status          TEXT    NOT NULL DEFAULT 'OPEN',    -- OPEN|CLOSED|SIMULATED_OPEN|SIMULATED_CLOSED
     candidate_id    INTEGER REFERENCES candidates(id),
     opened_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

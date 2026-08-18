@@ -30,6 +30,21 @@ export const RISK = {
   MAX_WEATHER_HORIZON_HOURS: 72,
   MAX_FORECAST_STALENESS_HOURS: 1,
 
+  // Module B — temperature bucket markets
+  // Minimum gap between our modelled probability and the ask before we act.
+  // Measured entry cost in these markets is ~1.7c of spread, so this leaves
+  // room for the forecast model being wrong as well as for the spread.
+  WEATHER_MIN_EDGE: 0.08,
+  // Skip buckets priced where the model is least trustworthy: deep longshots
+  // and near-certainties both sit in the distribution's thin tails.
+  WEATHER_MIN_ASK: 0.05,
+  WEATHER_MAX_ASK: 0.90,
+  // If modelled probability across an event's scraped buckets sums below this,
+  // the bucket set is probably missing a catch-all and edges are unreliable.
+  WEATHER_MIN_COVERAGE: 0.70,
+  // Cap positions per event so one city's forecast error can't dominate.
+  WEATHER_MAX_BUCKETS_PER_EVENT: 2,
+
   // Module C
   MAX_NEWS_PRICED_IN_MOVE_PCT: 0.15,
   NEWS_LOOKBACK_MINUTES: 15,

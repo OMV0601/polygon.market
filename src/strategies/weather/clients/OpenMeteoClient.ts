@@ -12,6 +12,9 @@ export interface DailyForecast {
   date: string;          // YYYY-MM-DD
   maxTempF: number;
   minTempF: number;
+  /** Most temperature markets are Celsius, so both units are carried. */
+  maxTempC: number;
+  minTempC: number;
   fetchedAt: Date;
 }
 
@@ -78,10 +81,14 @@ export class OpenMeteoClient {
 
     const { data, fetchedAt } = await httpGet<ForecastResponse>(url);
 
+    const toC = (f: number) => (f - 32) / 1.8;
+
     const forecasts: DailyForecast[] = data.daily.time.map((date, i) => ({
       date,
       maxTempF: data.daily.temperature_2m_max[i],
       minTempF: data.daily.temperature_2m_min[i],
+      maxTempC: toC(data.daily.temperature_2m_max[i]),
+      minTempC: toC(data.daily.temperature_2m_min[i]),
       fetchedAt,
     }));
 

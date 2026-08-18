@@ -4,7 +4,7 @@ import fs from 'fs';
 import { env } from '../../config/env';
 import { DB } from '../../config/constants';
 import { logger } from '../logger/logger';
-import { DDL, SCHEMA_VERSION } from './schema';
+import { ADDITIVE_COLUMNS, DDL, SCHEMA_VERSION } from './schema';
 
 export class Database {
   private db!: DatabaseSync;
@@ -44,12 +44,30 @@ export class Database {
 
     this.transaction(() => {
       for (const stmt of DDL) this.db.exec(stmt);
+      this.applyAdditiveColumns();
       this.db
         .prepare(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)`)
         .run('version', String(SCHEMA_VERSION));
     });
 
     logger.info('Schema migration complete', { version: SCHEMA_VERSION });
+  }
+
+  /**
+   * CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so
+   * databases created before a column was added need it bolted on explicitly.
+   */
+  private applyAdditiveColumns(): void {
+    for (const { table, column, type } of ADDITIVE_COLUMNS) {
+      const existing = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+        name: string;
+      }>;
+      if (existing.length === 0) continue; // table not created yet
+      if (existing.some((c) => c.name === column)) continue;
+
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      logger.info('Schema migration: column added', { table, column });
+    }
   }
 
   private getSchemaVersion(): number {
@@ -177,12 +195,20 @@ export class Database {
     currentPrice?: number;
     status: string;
     candidateId?: number;
+    midPrice?: number;
+    bestAsk?: number;
+    slippage?: number;
+    feePaid?: number;
+    costUsdc?: number;
   }): number {
     this.assertReady();
     const result = this.db
       .prepare(`
-        INSERT INTO positions (market_slug, outcome, shares, entry_price, current_price, status, candidate_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO positions (
+          market_slug, outcome, shares, entry_price, current_price, status, candidate_id,
+          mid_price, best_ask, slippage, fee_paid, cost_usdc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         position.marketSlug,
@@ -191,7 +217,12 @@ export class Database {
         position.entryPrice,
         position.currentPrice ?? null,
         position.status,
-        position.candidateId ?? null
+        position.candidateId ?? null,
+        position.midPrice ?? null,
+        position.bestAsk ?? null,
+        position.slippage ?? null,
+        position.feePaid ?? null,
+        position.costUsdc ?? null
       );
     return Number(result.lastInsertRowid);
   }
@@ -293,6 +324,45 @@ export class Database {
       .all(limit) as Array<{
         id: number; marketSlug: string; outcome: string; shares: number;
         entryPrice: number; exitPrice: number | null; realizedPnl: number | null;
+        openedAt: string; closedAt: string | null;
+      }>;
+  }
+
+  /**
+   * Closed positions joined to the candidate that produced them, so a track
+   * record can be scored against what the strategy actually predicted rather
+   * than just its P&L. `externalSignal` carries the strategy's own numbers
+   * (for WEATHER, the modelled bucket probability).
+   */
+  getResolvedPositionsWithSignals(): Array<{
+    id: number; marketSlug: string; outcome: string; shares: number;
+    entryPrice: number; exitPrice: number | null; realizedPnl: number | null;
+    midPrice: number | null; bestAsk: number | null; slippage: number | null;
+    feePaid: number | null; costUsdc: number | null;
+    strategy: string | null; externalSignal: string | null;
+    openedAt: string; closedAt: string | null;
+  }> {
+    this.assertReady();
+    return this.db
+      .prepare(`
+        SELECT p.id, p.market_slug AS marketSlug, p.outcome, p.shares,
+               p.entry_price AS entryPrice, p.current_price AS exitPrice,
+               p.realized_pnl AS realizedPnl,
+               p.mid_price AS midPrice, p.best_ask AS bestAsk, p.slippage,
+               p.fee_paid AS feePaid, p.cost_usdc AS costUsdc,
+               c.strategy, c.external_signal AS externalSignal,
+               p.opened_at AS openedAt, p.closed_at AS closedAt
+        FROM positions p
+        LEFT JOIN candidates c ON c.id = p.candidate_id
+        WHERE p.status = 'SIMULATED_CLOSED'
+        ORDER BY p.closed_at ASC
+      `)
+      .all() as Array<{
+        id: number; marketSlug: string; outcome: string; shares: number;
+        entryPrice: number; exitPrice: number | null; realizedPnl: number | null;
+        midPrice: number | null; bestAsk: number | null; slippage: number | null;
+        feePaid: number | null; costUsdc: number | null;
+        strategy: string | null; externalSignal: string | null;
         openedAt: string; closedAt: string | null;
       }>;
   }

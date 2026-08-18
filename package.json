@@ -8,6 +8,8 @@
     "validate": "tsx --no-warnings src/index.ts --validate-only",
     "report": "tsx --no-warnings src/index.ts --send-report",
     "reality-check": "tsx --no-warnings src/tools/reality-check.ts",
+    "track-record": "tsx --no-warnings src/tools/track-record.ts",
+    "test": "tsx --test tests/unit/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },
