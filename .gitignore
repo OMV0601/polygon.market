@@ -16,3 +16,6 @@ logs/*.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated report scratch file
+report.md
