@@ -1,0 +1,69 @@
+name: paper-trade
+
+# Runs the bot on GitHub's free runners instead of a machine you keep switched
+# on. Each run is a single cycle: resolve anything that settled, scan for new
+# edges, record simulated fills, then exit.
+#
+# Hourly is deliberate. Weather forecasts only refresh about that often, and
+# private repos get 2,000 free Actions minutes a month — hourly at ~2 minutes a
+# run leaves headroom, every 30 minutes would not.
+on:
+  schedule:
+    - cron: '7 * * * *'   # hourly at :07 — off-the-hour runs get scheduled sooner
+  workflow_dispatch:       # lets you trigger a run by hand from the Actions tab
+
+# Never let two cycles write the ledger at once.
+concurrency:
+  group: paper-trade
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # The ledger is gitignored, so it lives in the Actions cache between
+      # runs. Cache keys are immutable, so each run saves a new one and the
+      # restore-keys prefix picks up the most recent.
+      - name: Restore ledger
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: ledger-${{ github.run_id }}
+          restore-keys: ledger-
+
+      - name: Run one cycle
+        env:
+          WALLET_BALANCE_USDC: '50'
+          MAX_DAILY_DEPLOYMENT_USDC: '20'
+          LIVE_EXECUTION_ENABLED: 'false'
+          LOG_LEVEL: info
+        run: npm start -- --once
+
+      - name: Save ledger
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: ledger-${{ github.run_id }}
+
+      # A copy that survives cache eviction, and that you can download from the
+      # run page if you want to inspect the database directly.
+      - name: Upload ledger snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-${{ github.run_id }}
+          path: data/*.db
+          retention-days: 30
+          if-no-files-found: warn
