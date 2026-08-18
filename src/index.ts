@@ -90,7 +90,13 @@ async function main(): Promise<void> {
     new WalletMirrorStrategy(riskManager, bullpen, db, executionEngine),
     new WeatherStrategy(riskManager, bullpen, db, executionEngine),
     new NewsCatalystStrategy(riskManager, bullpen, db, executionEngine),
-    new CorrelationArbStrategy(riskManager, bullpen, db, executionEngine),
+    // CorrelationArbStrategy is disabled: its margin formula, |1 - (priceA +
+    // priceB)|, assumes an antonym pair is exhaustive. Live markets break that
+    // — it paired "Fed increase 50bps" with "Fed decrease 50bps" and reported a
+    // 99.3% arb, when the Fed holding rates makes both legs lose. It bought a
+    // 0.4c lottery ticket on the strength of it. Real risk-free arb needs the
+    // outcomes of a single event, which the temperature bucket series now
+    // gives us; revisit it there rather than by tuning entity matching.
   ];
 
   for (const strategy of strategies) strategy.start();

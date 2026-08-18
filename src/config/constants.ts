@@ -44,6 +44,9 @@ export const RISK = {
   WEATHER_MIN_COVERAGE: 0.70,
   // Cap positions per event so one city's forecast error can't dominate.
   WEATHER_MAX_BUCKETS_PER_EVENT: 2,
+  // Temperature markets are thinner than the wallet-mirror floor assumes:
+  // median ~$3k/24h, all above $1k. Depth at our size is checked separately.
+  WEATHER_MIN_VOLUME_24H_USDC: 1_000,
 
   // Module C
   MAX_NEWS_PRICED_IN_MOVE_PCT: 0.15,

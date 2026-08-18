@@ -48,9 +48,31 @@ function main(): void {
   const db = new Database();
   db.initialize();
 
-  const rows = db.getResolvedPositionsWithSignals();
+  const allRows = db.getResolvedPositionsWithSignals();
+
+  // Positions opened before schema v3 were filled at mid with no spread or fee.
+  // Mixing them in would flatter the record with trades that could not have
+  // been executed at the prices recorded, so they are reported and excluded.
+  const includeLegacy = process.argv.includes('--all');
+  const rows = includeLegacy ? allRows : allRows.filter((r) => r.costUsdc != null);
+  const legacyCount = allRows.length - allRows.filter((r) => r.costUsdc != null).length;
 
   console.log('═══ polygon.market — paper track record ═══');
+
+  if (legacyCount > 0 && includeLegacy) {
+    console.log(`\nIncluding ${legacyCount} pre-v3 position(s) filled at mid price (--all).`);
+    console.log('Their P&L is optimistic — no spread or fee was charged.');
+  } else if (legacyCount > 0) {
+    const legacyPnl = allRows
+      .filter((r) => r.costUsdc == null)
+      .reduce((a, r) => a + (r.realizedPnl ?? 0), 0);
+    console.log(
+      `\nExcluding ${legacyCount} position(s) from before the honest fill model ` +
+        `(${usd(legacyPnl)} P&L).`
+    );
+    console.log('Those filled at mid price with no spread or fee, so they are not');
+    console.log('evidence either way. Run `npm run track-record -- --all` to include them.');
+  }
 
   if (rows.length === 0) {
     console.log('\nNo resolved positions yet.');
