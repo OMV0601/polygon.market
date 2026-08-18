@@ -40,17 +40,31 @@ const h1 = (s: string) => console.log(`\n─── ${s} ${'─'.repeat(Math.max(
 const usd = (n: number) => `$${n.toFixed(2)}`;
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
-/** Gamma caps page size at 500; walk pages until exhausted or cap hit. */
-async function fetchAllActive(maxPages = 12): Promise<GammaMarket[]> {
+// Gamma silently caps page size at 100 regardless of the limit you ask for, so
+// pagination has to step by 100 or the first page looks like the whole market.
+const PAGE = 100;
+
+async function fetchAllActive(maxPages = 40): Promise<GammaMarket[]> {
   const all: GammaMarket[] = [];
+  const seen = new Set<string>();
+
   for (let page = 0; page < maxPages; page++) {
     const { data } = await httpGet<GammaMarket[]>(
-      `${GAMMA}/markets?active=true&closed=false&limit=500&offset=${page * 500}&order=volume24hr&ascending=false`
+      `${GAMMA}/markets?active=true&closed=false&limit=${PAGE}&offset=${page * PAGE}` +
+        `&order=volume24hr&ascending=false`
     );
     if (!data?.length) break;
-    all.push(...data);
-    if (data.length < 500) break;
+
+    // If the API ignores offset it replays page 0 forever — detect and bail.
+    const fresh = data.filter((m) => !seen.has(m.slug));
+    if (fresh.length === 0) break;
+    fresh.forEach((m) => seen.add(m.slug));
+    all.push(...fresh);
+
+    process.stdout.write(`\r  fetching… ${all.length} markets`);
+    if (data.length < PAGE) break;
   }
+  process.stdout.write('\r' + ' '.repeat(40) + '\r');
   return all;
 }
 
@@ -96,71 +110,114 @@ async function main(): Promise<void> {
     .map((m) => ({ market: m, parsed: parseWeatherMarket(m.slug, m.question) }))
     .filter((x) => x.parsed !== null);
 
-  // Anything temperature-shaped, regardless of whether our regexes handle it.
-  const tempShaped = universe.filter((m) =>
-    /temperature|degrees|°f|°c|\bhigh\b.*\b(in|on)\b|hottest|coldest|rain|snow/i.test(m.question)
-  );
+  // Actual temperature markets only. The old pattern also caught "WTI Crude Oil
+  // hit (HIGH) $90" because it keyed on the bare word "high".
+  const TEMP_RX = /\b(temperature|°\s*[cf]\b|degrees\s+(celsius|fahrenheit))/i;
+  const tempShaped = universe.filter((m) => TEMP_RX.test(m.question));
 
-  console.log(`Temperature/weather-shaped markets found: ${tempShaped.length}`);
-  console.log(`Of those, parseWeatherMarket() reads:     ${parsedMarkets.length}`);
+  // Polymarket runs these as bucket series: one market per temperature value,
+  // all resolving off the same reading. Group by city+date to count real events.
+  const BUCKET_RX = /highest temperature in ([A-Za-z .'-]+?) be\s+(-?\d+(?:\.\d+)?)\s*°?\s*([CF])\b.*?\bon\s+([A-Z][a-z]+\s+\d{1,2})/i;
+  const events = new Map<string, { city: string; unit: string; date: string; buckets: number[] }>();
+
+  for (const m of tempShaped) {
+    const b = BUCKET_RX.exec(m.question);
+    if (!b) continue;
+    const key = `${b[1].trim()}|${b[4]}`;
+    const e = events.get(key) ?? { city: b[1].trim(), unit: b[3].toUpperCase(), date: b[4], buckets: [] };
+    e.buckets.push(parseFloat(b[2]));
+    events.set(key, e);
+  }
+
+  console.log(`Temperature markets found:            ${tempShaped.length}`);
+  console.log(`Distinct city/date events:            ${events.size}`);
+  console.log(`parseWeatherMarket() can read:        ${parsedMarkets.length}`);
+
+  if (events.size > 0) {
+    console.log('\n  Bucket series detected:');
+    for (const e of events.values()) {
+      const sorted = e.buckets.sort((a, b) => a - b);
+      console.log(
+        `    · ${e.city}, ${e.date} — ${sorted.length} buckets ` +
+          `(${sorted[0]}–${sorted[sorted.length - 1]}°${e.unit})`
+      );
+    }
+    console.log('\n  These are banded markets, not above/below thresholds. Pricing one means');
+    console.log('  putting a forecast distribution over the buckets, not a single sigmoid.');
+  }
 
   if (tempShaped.length > 0 && parsedMarkets.length === 0) {
-    console.log('\n  ⚠ The weather strategy can generate zero candidates against live titles.');
-    console.log('    The parser expects "exceed 90°F" / "fall below 32°F" phrasing.');
-    console.log('    Real titles look like this:');
-    tempShaped.slice(0, 8).forEach((m) => console.log(`      · ${m.question}`));
-  } else if (parsedMarkets.length > 0) {
-    console.log('\n  Parsed markets:');
-    parsedMarkets.slice(0, 10).forEach(({ market, parsed }) =>
-      console.log(
-        `    · ${market.question}\n      → ${parsed!.city} ${parsed!.direction} ${parsed!.thresholdF}°F, ` +
-          `resolves ${parsed!.targetDate.toISOString().slice(0, 10)}`
-      )
+    console.log('\n  ⚠ Weather strategy generates zero candidates. Parser expects');
+    console.log('    "exceed 90°F" / "fall below 32°F". Live titles:');
+    tempShaped.slice(0, 10).forEach((m) => console.log(`      · ${m.question}`));
+  }
+
+  const celsius = tempShaped.filter((m) => /°\s*C\b|celsius/i.test(m.question)).length;
+  if (celsius > 0) {
+    console.log(
+      `\n  ${celsius} of ${tempShaped.length} are Celsius. The parser and tempToProb() are`
     );
+    console.log('  Fahrenheit-only, and non-US cities need Open-Meteo — NWSClient covers US only.');
   }
 
   // ── 3. The spread tax ─────────────────────────────────────────────────────
   h1('3. What entering a position actually costs');
 
-  // Only markets with real depth are worth measuring; thin ones quote garbage.
-  const liquid = universe.filter((m) => m.volume24hr > 10_000 && m.bestBid && m.bestAsk).slice(0, 25);
+  const quoted = universe.filter((m) => m.volume24hr > 10_000 && m.bestBid && m.bestAsk);
 
-  if (liquid.length === 0) {
-    console.log('No markets above the $10k/24h volume floor. Skipping.');
+  // A 0.3c spread on a 0.9c longshot is a 33% "cost" that means nothing — you
+  // would never size into a penny market. Measure the band we'd actually trade,
+  // which RiskManager already enforces via MIN/MAX_IMPLIED_PROBABILITY.
+  const inBand = quoted.filter((m) => {
+    const mid = (m.bestBid! + m.bestAsk!) / 2;
+    return mid >= RISK.MIN_IMPLIED_PROBABILITY && mid <= RISK.MAX_IMPLIED_PROBABILITY;
+  });
+
+  const cost = (m: GammaMarket) => {
+    const mid = (m.bestBid! + m.bestAsk!) / 2;
+    return (m.bestAsk! - mid) / mid;
+  };
+  const median = (xs: number[]) =>
+    xs.length ? [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)] : NaN;
+
+  console.log(`Liquid markets (>${usd(10_000)} 24h volume): ${quoted.length}`);
+  console.log(
+    `Of those, priced in the tradeable band ` +
+      `${RISK.MIN_IMPLIED_PROBABILITY}–${RISK.MAX_IMPLIED_PROBABILITY}: ${inBand.length}\n`
+  );
+
+  if (inBand.length === 0) {
+    console.log('  No liquid markets in the tradeable price band right now.');
   } else {
-    console.log(`Sampling ${liquid.length} markets above ${usd(10_000)} 24h volume.\n`);
     console.log('  market                                    bid    ask   spread   cost to enter');
     console.log('  ' + '─'.repeat(78));
-
-    const entryCosts: number[] = [];
-    for (const m of liquid.slice(0, 12)) {
-      const bid = m.bestBid!;
-      const ask = m.bestAsk!;
-      const mid = (bid + ask) / 2;
-      // You buy at the ask but the position is only worth mid — that gap is the
-      // instant, guaranteed loss the strategy's edge has to clear first.
-      const enterCost = (ask - mid) / mid;
-      entryCosts.push(enterCost);
+    for (const m of inBand.slice(0, 12)) {
       const title = m.question.length > 40 ? m.question.slice(0, 37) + '...' : m.question.padEnd(40);
       console.log(
-        `  ${title}  ${bid.toFixed(3)}  ${ask.toFixed(3)}  ${(ask - bid).toFixed(3)}   ${pct(enterCost).padStart(6)}`
+        `  ${title}  ${m.bestBid!.toFixed(3)}  ${m.bestAsk!.toFixed(3)}  ` +
+          `${(m.bestAsk! - m.bestBid!).toFixed(3)}   ${pct(cost(m)).padStart(6)}`
       );
     }
 
-    const median = entryCosts.sort((a, b) => a - b)[Math.floor(entryCosts.length / 2)];
-    console.log(`\n  Median cost to enter: ${pct(median)} of position value, paid immediately.`);
-    console.log(`  Configured fee assumption (RISK.POLYMARKET_FEE_RATE): ${pct(RISK.POLYMARKET_FEE_RATE)}`);
+    const medBand = median(inBand.map(cost));
+    const medAll = median(quoted.map(cost));
+
+    console.log(`\n  Median cost to enter, tradeable band: ${pct(medBand)}`);
+    console.log(`  Median across all liquid markets:     ${pct(medAll)}  ← inflated by penny longshots`);
+    console.log(`  Configured fee (RISK.POLYMARKET_FEE_RATE): ${pct(RISK.POLYMARKET_FEE_RATE)}`);
     console.log(
-      `\n  → Any strategy must beat ~${pct(median + RISK.POLYMARKET_FEE_RATE)} per round trip to break even.`
+      `\n  → In the band we'd trade, a strategy must beat ~${pct(medBand + RISK.POLYMARKET_FEE_RATE)} to break even.`
     );
-    console.log('    ExecutionEngine.simulateFill() currently fills at mid with no spread and');
-    console.log('    no fee, so paper P&L is overstated by roughly this much on every trade.');
+    console.log('    simulateFill() fills at mid with no spread and no fee, so paper P&L is');
+    console.log('    overstated by roughly that much on every trade.');
   }
 
   // ── 4. Real depth on one book ─────────────────────────────────────────────
   h1('4. Depth check — can a small order even fill?');
 
-  const probe = liquid[0] ?? universe[0];
+  // Probe a mid-priced market. Walking the book on a $0.009 longshot reports
+  // double-digit "slippage" that is really just one tick of a penny contract.
+  const probe = inBand[0] ?? quoted[0] ?? universe[0];
   if (probe) {
     try {
       const tokenIds = JSON.parse(probe.clobTokenIds) as string[];
