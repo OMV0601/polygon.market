@@ -100,7 +100,15 @@ const TRIMMED_KEYS = [
 const rawEnv: NodeJS.ProcessEnv = { ...process.env };
 for (const key of TRIMMED_KEYS) {
   const value = rawEnv[key];
-  if (typeof value === 'string') rawEnv[key] = value.trim();
+  if (typeof value !== 'string') continue;
+
+  const trimmed = value.trim();
+  // GitHub Actions sets a referenced-but-undefined secret to an empty string
+  // rather than leaving it unset, and a zod .default() only fills in for
+  // undefined. Deleting the key is what lets the default apply — otherwise an
+  // unset RESEND_FROM silently becomes an empty From header.
+  if (trimmed === '') delete rawEnv[key];
+  else rawEnv[key] = trimmed;
 }
 
 const result = EnvSchema.safeParse(rawEnv);

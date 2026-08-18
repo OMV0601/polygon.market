@@ -23,3 +23,11 @@ test('a clean value is left alone', async () => {
   const { env } = await import('../../src/config/env');
   assert.ok(!/^\s|\s$/.test(env.SMTP_PASS ?? ''));
 });
+
+test('an empty secret falls back to the default instead of blanking it', async () => {
+  // GitHub Actions sets every referenced-but-missing secret to "", which is how
+  // an unset RESEND_FROM produced an empty From header and a 422 from Resend.
+  process.env.RESEND_FROM = '';
+  const { env } = await import('../../src/config/env');
+  assert.equal(env.RESEND_FROM, 'onboarding@resend.dev');
+});
