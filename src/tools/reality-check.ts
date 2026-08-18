@@ -136,14 +136,24 @@ async function main(): Promise<void> {
   // Polymarket runs these as bucket series: one market per temperature value,
   // all resolving off the same reading. Group by city+date to count real events.
   const BUCKET_RX = /highest temperature in ([A-Za-z .'-]+?) be\s+(-?\d+(?:\.\d+)?)\s*°?\s*([CF])\b.*?\bon\s+([A-Z][a-z]+\s+\d{1,2})/i;
-  const events = new Map<string, { city: string; unit: string; date: string; buckets: number[] }>();
+  interface TempEvent {
+    city: string;
+    unit: string;
+    date: string;
+    buckets: number[];
+    markets: GammaMarket[];
+  }
+  const events = new Map<string, TempEvent>();
 
   for (const m of tempShaped) {
     const b = BUCKET_RX.exec(m.question);
     if (!b) continue;
     const key = `${b[1].trim()}|${b[4]}`;
-    const e = events.get(key) ?? { city: b[1].trim(), unit: b[3].toUpperCase(), date: b[4], buckets: [] };
+    const e =
+      events.get(key) ??
+      { city: b[1].trim(), unit: b[3].toUpperCase(), date: b[4], buckets: [], markets: [] };
     e.buckets.push(parseFloat(b[2]));
+    e.markets.push(m);
     events.set(key, e);
   }
 
@@ -152,14 +162,60 @@ async function main(): Promise<void> {
   console.log(`parseWeatherMarket() can read:        ${parsedMarkets.length}`);
 
   if (events.size > 0) {
-    console.log('\n  Bucket series detected:');
+    // The only thing that decides whether this is tradeable: can you get in and
+    // out without the spread eating the forecast edge?
+    const wxSpreads: number[] = [];
+    const wxVolumes: number[] = [];
+    for (const m of tempShaped) {
+      if (m.bestBid != null && m.bestAsk != null && m.bestAsk > m.bestBid) {
+        wxSpreads.push(m.bestAsk - m.bestBid);
+      }
+      wxVolumes.push(m.volume24hr ?? 0);
+    }
+    const med = (xs: number[]) =>
+      xs.length ? [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)] : NaN;
+
+    console.log('\n  ── Weather market tradeability ──');
+    console.log(`  Median spread on temp markets:  ${med(wxSpreads).toFixed(3)} (${(med(wxSpreads) * 100).toFixed(1)}c)`);
+    console.log(`  Median 24h volume:              ${usd(med(wxVolumes))}`);
+    console.log(`  Above $1k 24h volume:           ${wxVolumes.filter((v) => v > 1_000).length} of ${tempShaped.length}`);
+
+    // Buckets in one event are mutually exclusive and should sum to 1. If every
+    // bucket's ask sums to less than 1, buying the full set pays $1 at
+    // resolution for less than $1 — genuine arb, no forecast needed.
+    console.log('\n  ── Bucket completeness (sum of asks per event) ──');
+    const sums: Array<{ e: TempEvent; askSum: number; bidSum: number }> = [];
     for (const e of events.values()) {
+      const quoted = e.markets.filter((m) => m.bestAsk != null && m.bestBid != null);
+      if (quoted.length < 4) continue;
+      sums.push({
+        e,
+        askSum: quoted.reduce((s, m) => s + m.bestAsk!, 0),
+        bidSum: quoted.reduce((s, m) => s + m.bestBid!, 0),
+      });
+    }
+    sums.sort((a, b) => a.askSum - b.askSum);
+    for (const s of sums.slice(0, 8)) {
+      const flag = s.askSum < 1 ? '  ← asks sum below 1' : '';
+      console.log(
+        `    ${s.e.city.padEnd(14)} ${s.e.date.padEnd(11)} ${String(s.e.buckets.length).padStart(2)} buckets  ` +
+          `asks ${s.askSum.toFixed(3)}  bids ${s.bidSum.toFixed(3)}${flag}`
+      );
+    }
+    console.log('\n    Caveat: a sum below 1 is only free money if the buckets are exhaustive.');
+    console.log('    Polymarket usually adds "X or above" / "X or below" catch-alls that this');
+    console.log('    regex does not match, so treat these as leads to verify, not confirmed arb.');
+
+    console.log('\n  Largest events:');
+    const byBuckets = [...events.values()].sort((a, b) => b.buckets.length - a.buckets.length);
+    for (const e of byBuckets.slice(0, 8)) {
       const sorted = e.buckets.sort((a, b) => a - b);
       console.log(
         `    · ${e.city}, ${e.date} — ${sorted.length} buckets ` +
           `(${sorted[0]}–${sorted[sorted.length - 1]}°${e.unit})`
       );
     }
+    console.log(`    … and ${Math.max(0, events.size - 8)} more events`);
     console.log('\n  These are banded markets, not above/below thresholds. Pricing one means');
     console.log('  putting a forecast distribution over the buckets, not a single sigmoid.');
   }
