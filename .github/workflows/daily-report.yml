@@ -50,17 +50,43 @@ jobs:
       - name: Build the report
         run: npm run report:md -- report.md
 
+      # Assigning the issue is what actually triggers the email. Watching a repo
+      # defaults to "Participating and @mentions", which a bot-opened issue does
+      # not match, so without an assignee the report is created silently.
       - name: Publish as an issue
         env:
           GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           gh issue create \
             --title "polygon.market — $(date -u +%Y-%m-%d)" \
             --body-file report.md \
+            --assignee "$OWNER" \
             --label "daily-report" \
             || gh issue create \
                  --title "polygon.market — $(date -u +%Y-%m-%d)" \
-                 --body-file report.md
+                 --body-file report.md \
+                 --assignee "$OWNER"
+
+      # Secret values cannot be read back out of GitHub, so this reports only
+      # their shape — enough to tell a wrong-length or whitespace-padded value
+      # from a genuinely mismatched one, without printing the credential.
+      - name: Check the shape of the SMTP secrets
+        if: ${{ always() }}
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: |
+          echo "SMTP_USER length: ${#SMTP_USER}  (expected 21 for omvyas.0601@gmail.com)"
+          echo "SMTP_PASS length: ${#SMTP_PASS}  (expected exactly 16)"
+          case "$SMTP_PASS" in
+            *[[:space:]]*) echo "SMTP_PASS contains whitespace — spaces or a newline came with the paste" ;;
+            *)             echo "SMTP_PASS has no whitespace" ;;
+          esac
+          case "$SMTP_USER" in
+            *@gmail.com)   echo "SMTP_USER ends in @gmail.com" ;;
+            *)             echo "SMTP_USER does NOT end in @gmail.com — likely the wrong value" ;;
+          esac
 
       # Optional. Runs only if SMTP secrets exist, and never fails the job.
       - name: Also send by email
