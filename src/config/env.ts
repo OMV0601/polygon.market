@@ -52,7 +52,10 @@ const EnvSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   // Without a verified domain Resend only sends from onboarding@resend.dev, and
   // only to the address the Resend account itself is registered under.
-  RESEND_FROM: z.string().default('polygon.market <onboarding@resend.dev>'),
+  // Kept as a bare address: a display name containing a dot ("polygon.market")
+  // is not a valid unquoted RFC 5322 atom, and Resend rejects the whole header
+  // as "The domain is invalid" rather than naming the real problem.
+  RESEND_FROM: z.string().default('onboarding@resend.dev'),
 
   // Fallback: Gmail address that sends the report, plus a Google "app password".
   SMTP_USER: z.string().optional(),

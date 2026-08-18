@@ -117,8 +117,15 @@ export class DailyReport {
       const hint = /testing emails|verify a domain|own email address/i.test(detail)
         ? ' — without a verified domain, onboarding@resend.dev can only send' +
           ' to the address your Resend account is registered under.'
-        : '';
-      throw new Error(`Resend rejected the send (HTTP ${res.status}): ${detail}${hint}`);
+        : /domain is invalid/i.test(detail)
+          ? ' — the "from" address was rejected. Either its domain is not verified' +
+            ' on this Resend account, or a display name needs quoting.'
+          : '';
+      // Naming the addresses is what makes this diagnosable; neither is secret.
+      throw new Error(
+        `Resend rejected the send (HTTP ${res.status}) from=${env.RESEND_FROM} to=${to}: ` +
+          `${detail}${hint}`
+      );
     }
 
     return 'resend';
