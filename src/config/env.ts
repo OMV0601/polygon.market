@@ -68,7 +68,30 @@ const EnvSchema = z.object({
 
 export type Env = z.infer<typeof EnvSchema>;
 
-const result = EnvSchema.safeParse(process.env);
+/**
+ * Credentials pasted into a secret store or .env pick up stray whitespace
+ * surprisingly often — a trailing newline in a GitHub Actions secret is enough
+ * to make Gmail reject an otherwise valid app password with a bad-credentials
+ * error that names nothing useful. Trim them before validation so the value
+ * that was intended is the value that gets used.
+ */
+const TRIMMED_KEYS = [
+  'SMTP_USER',
+  'SMTP_PASS',
+  'REPORT_EMAIL_TO',
+  'ANTHROPIC_API_KEY',
+  'TWITTER_BEARER_TOKEN',
+  'NEWS_API_KEY',
+  'TRACKED_WALLETS',
+] as const;
+
+const rawEnv: NodeJS.ProcessEnv = { ...process.env };
+for (const key of TRIMMED_KEYS) {
+  const value = rawEnv[key];
+  if (typeof value === 'string') rawEnv[key] = value.trim();
+}
+
+const result = EnvSchema.safeParse(rawEnv);
 
 if (!result.success) {
   console.error('[FATAL] Invalid environment configuration:');
