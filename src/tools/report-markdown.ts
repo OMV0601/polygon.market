@@ -36,7 +36,7 @@ function main(): void {
   out.push('');
   out.push('| | |');
   out.push('|---|---|');
-  out.push(`| Today's P&L | **${money(todayRealized)}** |`);
+  out.push(`| P&L, last 24h | **${money(todayRealized)}** |`);
   out.push(`| Total P&L | **${money(s.totalPnl)}** |`);
   out.push(`| Win rate | ${s.closedCount > 0 ? (s.winRate * 100).toFixed(0) + '%' : '—'} |`);
   out.push(`| Open positions | ${s.openCount} |`);
@@ -44,10 +44,10 @@ function main(): void {
   out.push(`| Capital deployed | $${s.openExposure.toFixed(2)} |`);
   out.push('');
 
-  out.push(`### Resolved today (${closed.length})`);
+  out.push(`### Resolved in the last 24h (${closed.length})`);
   out.push('');
   if (closed.length === 0) {
-    out.push('_Nothing resolved today._');
+    out.push('_Nothing resolved in the last 24 hours._');
   } else {
     out.push('| Market | Pick | Entry | Exit | P&L | |');
     out.push('|---|---|---|---|---|---|');
@@ -62,10 +62,10 @@ function main(): void {
   }
   out.push('');
 
-  out.push(`### Opened today (${opened.length})`);
+  out.push(`### Opened in the last 24h (${opened.length})`);
   out.push('');
   if (opened.length === 0) {
-    out.push('_No new positions today._');
+    out.push('_No new positions in the last 24 hours._');
   } else {
     out.push('| Market | Pick | Entry | Stake |');
     out.push('|---|---|---|---|');

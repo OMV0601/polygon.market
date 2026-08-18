@@ -405,6 +405,15 @@ export class Database {
   // ── Daily P&L ─────────────────────────────────────────────────────────────
 
   // Positions opened today (UTC) — for the daily email report.
+  /**
+   * Positions opened in the last 24 hours.
+   *
+   * A rolling window rather than DATE('now'), which is the UTC calendar day:
+   * the report is scheduled for early UTC to land in the evening in the
+   * reader's timezone, so a UTC-day filter would cover only the hour or two
+   * since midnight and omit everything the bot actually did. The risk limits
+   * keep their UTC-day reset — those are meant to reset on a fixed boundary.
+   */
   getPositionsOpenedToday(): Array<{
     marketSlug: string; outcome: string; shares: number; entryPrice: number;
   }> {
@@ -413,13 +422,13 @@ export class Database {
       .prepare(`
         SELECT market_slug AS marketSlug, outcome, shares, entry_price AS entryPrice
         FROM positions
-        WHERE DATE(opened_at) = DATE('now') AND status LIKE 'SIMULATED%'
+        WHERE opened_at >= datetime('now', '-24 hours') AND status LIKE 'SIMULATED%'
         ORDER BY opened_at DESC
       `)
       .all() as Array<{ marketSlug: string; outcome: string; shares: number; entryPrice: number }>;
   }
 
-  // Positions that resolved today (UTC), with win/loss result — for the report.
+  // Positions resolved in the last 24 hours, with win/loss — for the report.
   getPositionsClosedToday(): Array<{
     marketSlug: string; outcome: string; shares: number;
     entryPrice: number; exitPrice: number | null; realizedPnl: number | null;
@@ -430,7 +439,7 @@ export class Database {
         SELECT market_slug AS marketSlug, outcome, shares,
                entry_price AS entryPrice, current_price AS exitPrice, realized_pnl AS realizedPnl
         FROM positions
-        WHERE DATE(closed_at) = DATE('now') AND status = 'SIMULATED_CLOSED'
+        WHERE closed_at >= datetime('now', '-24 hours') AND status = 'SIMULATED_CLOSED'
         ORDER BY closed_at DESC
       `)
       .all() as Array<{

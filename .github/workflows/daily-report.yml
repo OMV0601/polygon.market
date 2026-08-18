@@ -9,7 +9,11 @@ name: daily-report
 # report.
 on:
   schedule:
-    - cron: '30 1 * * *'   # 01:30 UTC daily — 07:00 IST
+    # 01:00 UTC = 18:00 US Pacific during PDT, 17:00 during PST. Actions cron is
+    # always UTC and does not follow daylight saving, so the local hour shifts
+    # by one in winter. The report covers a rolling 24 hours, not a UTC calendar
+    # day, so an evening-Pacific send still summarises a full day of trading.
+    - cron: '0 1 * * *'
   workflow_dispatch:
 
 concurrency:
