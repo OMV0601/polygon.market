@@ -47,7 +47,14 @@ const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
 
   // ─── Daily email report (optional) ──────────────────────────────────────────
-  // Gmail address that sends the report, plus a Google "app password".
+  // Preferred: a Resend API key. Resend reports why a send failed, where Gmail
+  // answers every problem with the same 535. Takes precedence over SMTP.
+  RESEND_API_KEY: z.string().optional(),
+  // Without a verified domain Resend only sends from onboarding@resend.dev, and
+  // only to the address the Resend account itself is registered under.
+  RESEND_FROM: z.string().default('polygon.market <onboarding@resend.dev>'),
+
+  // Fallback: Gmail address that sends the report, plus a Google "app password".
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
   // Who receives the report. Defaults to SMTP_USER if left blank.
@@ -76,6 +83,8 @@ export type Env = z.infer<typeof EnvSchema>;
  * that was intended is the value that gets used.
  */
 const TRIMMED_KEYS = [
+  'RESEND_API_KEY',
+  'RESEND_FROM',
   'SMTP_USER',
   'SMTP_PASS',
   'REPORT_EMAIL_TO',

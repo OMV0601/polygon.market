@@ -16,13 +16,16 @@ export class DailyReport {
 
   start(): void {
     if (!this.configured()) {
-      logger.warn('DailyReport: email not configured (SMTP_USER / SMTP_PASS missing) — skipping');
+      logger.warn(
+        'DailyReport: email not configured (need RESEND_API_KEY, or SMTP_USER and SMTP_PASS) — skipping'
+      );
       return;
     }
     this.scheduleNext();
     logger.info('DailyReport: scheduled', {
       hourUtc: env.REPORT_HOUR_UTC,
-      to: env.REPORT_EMAIL_TO || env.SMTP_USER,
+      via: env.RESEND_API_KEY ? 'resend' : 'gmail',
+      to: this.recipient(),
     });
   }
 
@@ -34,7 +37,11 @@ export class DailyReport {
   }
 
   private configured(): boolean {
-    return Boolean(env.SMTP_USER && env.SMTP_PASS);
+    return Boolean(env.RESEND_API_KEY || (env.SMTP_USER && env.SMTP_PASS));
+  }
+
+  private recipient(): string | undefined {
+    return env.REPORT_EMAIL_TO || env.SMTP_USER;
   }
 
   private scheduleNext(): void {
@@ -50,7 +57,14 @@ export class DailyReport {
   // `npm run report` test command.
   async sendReport(): Promise<void> {
     if (!this.configured()) {
-      throw new Error('Email not configured: set SMTP_USER and SMTP_PASS in .env');
+      throw new Error(
+        'Email not configured: set RESEND_API_KEY, or SMTP_USER and SMTP_PASS'
+      );
+    }
+
+    const to = this.recipient();
+    if (!to) {
+      throw new Error('No recipient: set REPORT_EMAIL_TO');
     }
 
     const summary = this.db.getPnlSummary();
@@ -64,6 +78,53 @@ export class DailyReport {
       `polygon.market — ${date}: ${dir} $${Math.abs(todayRealized).toFixed(2)} today ` +
       `(total ${summary.totalPnl >= 0 ? '+' : '-'}$${Math.abs(summary.totalPnl).toFixed(2)})`;
 
+    const html = this.buildHtml(date, summary, opened, closed, todayRealized);
+
+    const via = env.RESEND_API_KEY
+      ? await this.sendViaResend(to, subject, html)
+      : await this.sendViaSmtp(to, subject, html);
+
+    logger.info('DailyReport: sent', {
+      via,
+      to,
+      newBets: opened.length,
+      resolved: closed.length,
+      todayRealized: todayRealized.toFixed(2),
+    });
+  }
+
+  /**
+   * Resend's HTTP API. Preferred over SMTP because a rejected send comes back
+   * as JSON explaining what was wrong, rather than the single 535 Gmail
+   * returns for a bad password, a wrong account, and a padded value alike.
+   */
+  private async sendViaResend(to: string, subject: string, html: string): Promise<string> {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ from: env.RESEND_FROM, to: [to], subject, html }),
+    });
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      // The most common rejection on a fresh account: no verified domain, so
+      // onboarding@resend.dev may only deliver to the account's own address.
+      // Key off what Resend actually said — a bare 403 can equally come from a
+      // proxy between us and the API, and that hint would send you the wrong way.
+      const hint = /testing emails|verify a domain|own email address/i.test(detail)
+        ? ' — without a verified domain, onboarding@resend.dev can only send' +
+          ' to the address your Resend account is registered under.'
+        : '';
+      throw new Error(`Resend rejected the send (HTTP ${res.status}): ${detail}${hint}`);
+    }
+
+    return 'resend';
+  }
+
+  private async sendViaSmtp(to: string, subject: string, html: string): Promise<string> {
     const transporter = nodemailer.createTransport({
       service: 'gmail',
       auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
@@ -71,17 +132,12 @@ export class DailyReport {
 
     await transporter.sendMail({
       from: `polygon.market <${env.SMTP_USER}>`,
-      to: env.REPORT_EMAIL_TO || env.SMTP_USER,
+      to,
       subject,
-      html: this.buildHtml(date, summary, opened, closed, todayRealized),
+      html,
     });
 
-    logger.info('DailyReport: sent', {
-      to: env.REPORT_EMAIL_TO || env.SMTP_USER,
-      newBets: opened.length,
-      resolved: closed.length,
-      todayRealized: todayRealized.toFixed(2),
-    });
+    return 'gmail';
   }
 
   private buildHtml(
