@@ -49,10 +49,24 @@ async function fetchAllActive(maxPages = 40): Promise<GammaMarket[]> {
   const seen = new Set<string>();
 
   for (let page = 0; page < maxPages; page++) {
-    const { data } = await httpGet<GammaMarket[]>(
-      `${GAMMA}/markets?active=true&closed=false&limit=${PAGE}&offset=${page * PAGE}` +
-        `&order=volume24hr&ascending=false`
-    );
+    let data: GammaMarket[] | undefined;
+
+    try {
+      ({ data } = await httpGet<GammaMarket[]>(
+        `${GAMMA}/markets?active=true&closed=false&limit=${PAGE}&offset=${page * PAGE}` +
+          `&order=volume24hr&ascending=false`
+      ));
+    } catch (err) {
+      // Gamma 422s past a maximum offset. That is the end of the walk, not a
+      // failure — keep everything collected so far.
+      process.stdout.write('\r' + ' '.repeat(40) + '\r');
+      console.log(
+        `  (pagination stopped at offset ${page * PAGE}: ${(err as Error).message} — ` +
+          `API offset limit, using ${all.length} markets)`
+      );
+      return all;
+    }
+
     if (!data?.length) break;
 
     // If the API ignores offset it replays page 0 forever — detect and bail.
@@ -75,11 +89,15 @@ async function main(): Promise<void> {
   // ── 1. Market universe ────────────────────────────────────────────────────
   h1('1. What the bot can see');
 
-  let universe: GammaMarket[];
+  let universe: GammaMarket[] = [];
   try {
     universe = await fetchAllActive();
   } catch (err) {
-    console.log(`✗ Cannot reach Polymarket: ${(err as Error).message}`);
+    console.log(`  fetch error: ${(err as Error).message}`);
+  }
+
+  if (universe.length === 0) {
+    console.log('✗ Cannot reach Polymarket — got zero markets.');
     console.log('  Nothing below can run. Check network access to gamma-api.polymarket.com.');
     process.exit(1);
   }
@@ -88,7 +106,7 @@ async function main(): Promise<void> {
     `${GAMMA}/markets?active=true&closed=false&limit=100`
   );
 
-  console.log(`Active markets on Polymarket:  ${universe.length}`);
+  console.log(`Active markets reachable:      ${universe.length}`);
   console.log(`What discover() fetches:       ${discoverSlice?.length ?? 0}`);
   console.log(
     `Coverage:                      ${pct((discoverSlice?.length ?? 0) / Math.max(universe.length, 1))}`
