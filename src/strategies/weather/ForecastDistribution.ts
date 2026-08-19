@@ -52,12 +52,56 @@ function normalCdf(x: number): number {
   return 0.5 * (1 + (z >= 0 ? erf : -erf));
 }
 
-/** Forecast uncertainty at a given lead time, in the requested unit. */
-export function sigmaForHorizon(horizonHours: number, unit: 'C' | 'F'): number {
+/**
+ * Forecast uncertainty at a given lead time, in the requested unit.
+ *
+ * `ensembleSpreadC` is the standard deviation across ensemble members. When
+ * present it is a *measurement* of the forecast's uncertainty for this specific
+ * day rather than an assumption from a curve, so it takes precedence — a
+ * settled high-pressure day and a frontal passage have genuinely different
+ * uncertainty, and no function of lead time alone can tell them apart.
+ *
+ * A floor still applies: ensemble spread understates true error, because every
+ * member shares the same model physics and so shares its biases.
+ *
+ * `calibrationScale` is the correction fitted from resolved forecasts. It
+ * defaults to 1 (use the prior unchanged) until enough pairs exist to do better.
+ */
+export function sigmaForHorizon(
+  horizonHours: number,
+  unit: 'C' | 'F',
+  opts: { ensembleSpreadC?: number; calibrationScale?: number } = {}
+): number {
+  const { ensembleSpreadC, calibrationScale = 1 } = opts;
+
   const clamped = Math.max(0, Math.min(horizonHours, MAX_USEFUL_HORIZON_HOURS * 2));
-  const sigmaC = SIGMA_BASE_C + SIGMA_PER_HOUR_C * clamped;
+  const priorC = SIGMA_BASE_C + SIGMA_PER_HOUR_C * clamped;
+
+  let sigmaC = priorC;
+  if (ensembleSpreadC != null && isFinite(ensembleSpreadC) && ensembleSpreadC > 0) {
+    // Members share model physics, so their disagreement is a lower bound on
+    // real error. Never let it collapse below a floor that grows with lead time.
+    const floorC = SIGMA_BASE_C * 0.7 + SIGMA_PER_HOUR_C * 0.5 * clamped;
+    sigmaC = Math.max(ensembleSpreadC, floorC);
+  }
+
+  sigmaC *= calibrationScale;
+
   // Sigma is a width, so it scales by the degree-size ratio only — no offset.
   return unit === 'F' ? sigmaC * 1.8 : sigmaC;
+}
+
+/**
+ * Rescales bucket probabilities so an exhaustive set sums to 1.
+ *
+ * Only safe when the buckets genuinely cover every outcome; on a partial set it
+ * would inflate each remaining bucket and manufacture edge. The caller checks
+ * coverage first via bucketSetCoverage.
+ */
+export function normalizeBuckets(probs: number[]): number[] {
+  const total = probs.reduce((a, b) => a + b, 0);
+  if (total <= 0) return probs.map(() => 0);
+  return probs.map((p) => p / total);
 }
 
 /**

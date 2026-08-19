@@ -1,7 +1,7 @@
 // SQLite DDL. Run in order — each table depends only on prior ones.
 // Never ALTER TABLE here; add new migration functions in Database.ts instead.
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * Columns added to existing tables after v1. The DDL above uses
@@ -83,6 +83,46 @@ export const DDL: string[] = [
     opened_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     closed_at       TEXT
   )`,
+
+  // ── Forecast log — every model output, traded or not ──────────────────────
+  // Trades are a biased sample of forecasts: they are the ones that cleared a
+  // threshold. Scoring a model on them alone measures the threshold, not the
+  // model. Everything the model says is logged here, and the market's price at
+  // the same instant is stored alongside so the two can be scored on identical
+  // questions.
+  `CREATE TABLE IF NOT EXISTS forecasts (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name             TEXT    NOT NULL,
+    model_version          TEXT    NOT NULL,
+    token_id               TEXT,
+    market_slug            TEXT    NOT NULL,
+    predicted_prob         REAL    NOT NULL,
+    market_price_at_forecast REAL,
+    features               TEXT,             -- JSON: inputs behind the number
+    forecast_at            TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    resolves_at            TEXT,
+    resolved_outcome       INTEGER,          -- 1 = YES, 0 = NO, NULL = pending
+    resolved_at            TEXT,
+    UNIQUE(model_name, market_slug, forecast_at)
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_forecasts_slug     ON forecasts(market_slug)`,
+  `CREATE INDEX IF NOT EXISTS idx_forecasts_pending  ON forecasts(resolved_outcome) WHERE resolved_outcome IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_forecasts_model    ON forecasts(model_name, resolved_at)`,
+
+  // ── Order book snapshots — for replaying parameter changes ────────────────
+  `CREATE TABLE IF NOT EXISTS book_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_slug  TEXT    NOT NULL,
+    outcome      TEXT    NOT NULL,
+    best_bid     REAL,
+    best_ask     REAL,
+    bids_json    TEXT,
+    asks_json    TEXT,
+    captured_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_snapshots_slug_time ON book_snapshots(market_slug, captured_at)`,
 
   `CREATE INDEX IF NOT EXISTS idx_positions_slug   ON positions(market_slug)`,
   `CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)`,

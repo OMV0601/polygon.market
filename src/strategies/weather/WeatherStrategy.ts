@@ -12,9 +12,18 @@ import {
   MAX_USEFUL_HORIZON_HOURS,
   bucketProbability,
   bucketSetCoverage,
+  normalizeBuckets,
   sigmaForHorizon,
 } from './ForecastDistribution';
+import { evaluateEdge } from '../../core/edge/EdgeEngine';
+import { correlationGroupFor, sizePosition } from '../../core/risk/PositionSizer';
+import { fitSigmaScale } from '../../core/calibration/CalibrationReport';
 import type { CandidatePayload, ForecastData, StrategyModule } from '../../core/risk/types';
+
+/** Identifies this model in the forecast log, so scores stay comparable. */
+const MODEL_NAME = 'weather-bucket';
+/** Bump whenever the pricing changes, so old and new are scored separately. */
+const MODEL_VERSION = '2.0.0-ensemble';
 
 interface MarketLike {
   slug: string;
@@ -49,7 +58,12 @@ export class WeatherStrategy extends BaseStrategy {
 
   private readonly openMeteo = new OpenMeteoClient();
 
+  /** Multiplier on forecast spread, refit from resolved forecasts each cycle. */
+  private calibrationScale = 1;
+
   protected async scan(): Promise<CandidatePayload[]> {
+    this.refreshCalibration();
+
     const entries = await this.loadBuckets();
     if (entries.length === 0) {
       logger.info('Weather: no temperature bucket markets found');
@@ -154,6 +168,17 @@ export class WeatherStrategy extends BaseStrategy {
 
     const forecastValue = unit === 'C' ? forecast.maxTempC : forecast.maxTempF;
 
+    // Ensemble spread measures this day's uncertainty instead of reading it off
+    // a curve. Falls back to the curve when the endpoint is unavailable.
+    let ensembleSpreadC: number | undefined;
+    const geo = await this.openMeteo.geocode(city).catch(() => null);
+    if (geo) {
+      const ens = await this.openMeteo.getEnsembleForDate(geo.latitude, geo.longitude, targetDate);
+      if (ens && ens.membersC.length >= 3) ensembleSpreadC = ens.spreadC;
+    }
+
+    const sigmaOpts = { ensembleSpreadC, calibrationScale: this.calibrationScale };
+
     // A bucket set that doesn't account for most of the distribution is missing
     // outcomes — usually an unparsed "X or above" catch-all. Edges computed
     // against a partial set are not trustworthy.
@@ -172,102 +197,225 @@ export class WeatherStrategy extends BaseStrategy {
       return [];
     }
 
-    const scored = buckets
-      .map((entry) => {
-        const modelProb = bucketProbability({
-          forecast: forecastValue,
+    // Every bucket's probability is logged, not just the ones that trade.
+    // Scoring only the traded ones would measure the entry threshold rather
+    // than the model, and the threshold is the part we already know.
+    const priced = buckets.map((entry) => ({
+      entry,
+      modelProb: bucketProbability({
+        forecast: forecastValue,
+        unit,
+        horizonHours,
+        lowerEdge: entry.parsed.lowerEdge,
+        upperEdge: entry.parsed.upperEdge,
+      }),
+    }));
+
+    // The bucket set is exhaustive (coverage passed), so probabilities are
+    // renormalised to sum to 1 — the outcomes are mutually exclusive and one of
+    // them must happen.
+    const normalized = normalizeBuckets(priced.map((p) => p.modelProb));
+
+    const sigma = sigmaForHorizon(horizonHours, unit, sigmaOpts);
+    const resolvesAt = new Date(highTempAt).toISOString();
+
+    for (let i = 0; i < priced.length; i++) {
+      const { entry } = priced[i];
+      this.db.insertForecast({
+        modelName: MODEL_NAME,
+        modelVersion: MODEL_VERSION,
+        marketSlug: entry.market.slug,
+        predictedProb: normalized[i],
+        marketPriceAtForecast: (entry.market.bestBid + entry.market.bestAsk) / 2,
+        features: {
+          city,
           unit,
+          forecastValue,
+          sigma,
+          ensembleSpreadC: ensembleSpreadC ?? null,
+          calibrationScale: this.calibrationScale,
           horizonHours,
-          lowerEdge: entry.parsed.lowerEdge,
-          upperEdge: entry.parsed.upperEdge,
+          bucketLower: entry.parsed.lowerEdge,
+          bucketUpper: entry.parsed.upperEdge,
+        },
+        resolvesAt,
+      });
+    }
+
+    const bankroll = this.bankroll();
+    const groupKey = correlationGroupFor(buckets[0].market.slug);
+    const groupExposure = this.db.getOpenExposureByEventPrefix(groupKey);
+
+    const candidates: CandidatePayload[] = [];
+
+    // Rank by the engine's own measure so buckets compete on net cents per
+    // share rather than on a raw probability gap.
+    const ranked = priced
+      .map((p, i) => ({ ...p, modelProb: normalized[i] }))
+      .sort((a, b) => b.modelProb - a.modelProb);
+
+    for (const { entry, modelProb } of ranked) {
+      if (candidates.length >= RISK.WEATHER_MAX_BUCKETS_PER_EVENT) break;
+
+      const ask = entry.market.bestAsk;
+      if (ask < RISK.WEATHER_MIN_ASK || ask > RISK.WEATHER_MAX_ASK) continue;
+
+      let book;
+      try {
+        book = await this.bullpen.orderBook(entry.market.slug, 'YES');
+      } catch (err) {
+        logger.debug('Weather: order book unavailable', {
+          slug: entry.market.slug,
+          error: (err as Error).message,
         });
-        // We pay the ask to enter, so that — not the mid — is what the model
-        // has to beat.
-        const ask = entry.market.bestAsk;
-        return { entry, modelProb, ask, edge: modelProb - ask };
-      })
-      .filter(
-        (s) =>
-          s.ask >= RISK.WEATHER_MIN_ASK &&
-          s.ask <= RISK.WEATHER_MAX_ASK &&
-          s.edge >= RISK.WEATHER_MIN_EDGE
-      )
-      .sort((a, b) => b.edge - a.edge)
-      .slice(0, RISK.WEATHER_MAX_BUCKETS_PER_EVENT);
+        continue;
+      }
 
-    if (scored.length === 0) return [];
+      // Snapshot the book so a parameter change can be replayed against the
+      // same conditions later instead of costing another day of calendar time.
+      this.db.insertBookSnapshot({
+        marketSlug: entry.market.slug,
+        outcome: 'YES',
+        bestBid: book.bestBid,
+        bestAsk: book.bestAsk,
+        bids: book.bids,
+        asks: book.asks,
+      });
 
-    logger.info('Weather: edge found', {
-      city,
-      date: targetDate.toISOString().slice(0, 10),
-      unit,
-      forecast: forecastValue.toFixed(1),
-      sigma: sigmaForHorizon(horizonHours, unit).toFixed(2),
-      horizonHours: horizonHours.toFixed(1),
-      coverage: coverage.toFixed(3),
-      buckets: scored.map((s) => ({
-        title: s.entry.market.title,
-        model: s.modelProb.toFixed(3),
-        ask: s.ask.toFixed(3),
-        edge: s.edge.toFixed(3),
-      })),
-    });
+      // Provisional size drives how far up the book the engine walks; the
+      // sizer then prices the edge that walk actually produced.
+      const probe = Math.max(1, (RISK.WEATHER_MAX_BUCKETS_PER_EVENT / 100) * bankroll);
 
-    return scored.map(({ entry, modelProb, ask, edge }) => {
+      const edge = evaluateEdge({
+        q: modelProb,
+        confidence: Math.min(0.95, coverage),
+        bids: book.bids,
+        asks: book.asks,
+        bestBid: book.bestBid,
+        bestAsk: book.bestAsk,
+        category: 'weather',
+        intendedSizeUsdc: probe,
+        recentVolatility: sigma > 0 ? Math.min(0.05, sigma / 100) : 0,
+      });
+
+      if (edge.action === 'PASS') {
+        logger.debug('Weather: no actionable edge', { slug: entry.market.slug, reason: edge.reason });
+        continue;
+      }
+
+      // QUOTE is a real outcome of the engine, but there is no maker execution
+      // path yet — posting requires signed limit orders. Recording it keeps the
+      // opportunity visible in the log without pretending it was traded.
+      if (edge.action === 'QUOTE') {
+        logger.info('Weather: maker-only opportunity (no quoting path yet)', {
+          slug: entry.market.slug,
+          makerEdgeCents: edge.makerEdgeCentsPerShare.toFixed(2),
+          takerEdgeCents: edge.takerEdgeCentsPerShare.toFixed(2),
+          quotePrice: edge.quotePrice.toFixed(3),
+        });
+        continue;
+      }
+
+      const sized = sizePosition({
+        q: modelProb,
+        price: edge.avgFillPrice,
+        bankroll,
+        maxPositionPct: parseFloat(process.env.MAX_POSITION_SIZE_PCT ?? '5'),
+        maxGroupPct: RISK.MAX_EVENT_EXPOSURE_PCT,
+        groupExposureUsdc: groupExposure,
+        fillableUsdc: edge.fillableUsdc,
+      });
+
+      if (sized.sizeUsdc <= 0) {
+        logger.debug('Weather: sized to zero', { slug: entry.market.slug, boundBy: sized.boundBy });
+        continue;
+      }
+
+      logger.info('Weather: tradeable edge', {
+        city,
+        slug: entry.market.slug,
+        modelProb: modelProb.toFixed(3),
+        avgFill: edge.avgFillPrice.toFixed(3),
+        takerEdgeCents: edge.takerEdgeCentsPerShare.toFixed(2),
+        feePerShareCents: (edge.feePerShare * 100).toFixed(2),
+        sizeUsdc: sized.sizeUsdc.toFixed(2),
+        kelly: sized.fullKellyFraction.toFixed(3),
+        boundBy: sized.boundBy,
+        sigma: sigma.toFixed(2),
+        ensembleSpread: ensembleSpreadC?.toFixed(2) ?? 'n/a',
+      });
+
       const forecastData: ForecastData = {
         source: 'OPEN_METEO',
         city,
         forecastedValue: forecastValue,
-        unit: `°${unit}`,
-        confidenceInterval: [
-          forecastValue - sigmaForHorizon(horizonHours, unit),
-          forecastValue + sigmaForHorizon(horizonHours, unit),
-        ],
+        unit: `\u00b0${unit}`,
+        confidenceInterval: [forecastValue - sigma, forecastValue + sigma],
         fetchedAt: forecast.fetchedAt,
       };
 
-      return {
+      candidates.push({
         strategyModule: 'WEATHER',
         marketSlug: entry.market.slug,
-        // Bucket markets are single-outcome: we are buying YES on this bucket.
         outcome: 'YES',
-        impliedProbability: ask,
+        impliedProbability: edge.avgFillPrice,
         externalSignalData: {
           city,
           targetDate: targetDate.toISOString(),
           unit,
+          feeCategory: 'weather',
           bucketLower: entry.parsed.lowerEdge,
           bucketUpper: entry.parsed.upperEdge,
           bucketKind: entry.parsed.kind,
           forecastValue,
-          sigma: sigmaForHorizon(horizonHours, unit),
+          sigma,
+          ensembleSpreadC: ensembleSpreadC ?? null,
+          calibrationScale: this.calibrationScale,
           horizonHours,
           modelProb,
-          ask,
-          edge,
+          avgFillPrice: edge.avgFillPrice,
+          takerEdgeCents: edge.takerEdgeCentsPerShare,
+          makerEdgeCents: edge.makerEdgeCentsPerShare,
+          kellyFraction: sized.fullKellyFraction,
+          sizeBoundBy: sized.boundBy,
           coverage,
           volume24h: entry.market.volume24h,
         },
-        confidenceScore: Math.min(edge * 4, 0.95),
-        suggestedSize: this.size(edge),
+        confidenceScore: Math.min(0.95, coverage),
+        suggestedSize: sized.sizeUsdc,
         forecastData,
-      };
-    });
+      });
+    }
+
+    return candidates;
   }
 
-  // ── Sizing ────────────────────────────────────────────────────────────────
+  // ── Bankroll and calibration ──────────────────────────────────────────────
+
+  /** Bankroll from the ledger, falling back to the configured starting stake. */
+  private bankroll(): number {
+    const configured = parseFloat(process.env.WALLET_BALANCE_USDC ?? '0');
+    const realized = this.db.getPnlSummary().realizedPnl;
+    // Deployed capital is still ours, so only realised P&L moves the base.
+    // A drawdown shrinks every subsequent position without any manual step.
+    return Math.max(0, configured + realized);
+  }
 
   /**
-   * Scales with edge, capped by the configured per-trade limit. Falls back to a
-   * flat $10 when no bankroll is configured so paper runs still produce data.
+   * Correction to forecast spread, refitted once per cycle from resolved
+   * forecasts. Stays at 1 until there are enough pairs to beat the prior.
    */
-  private size(edge: number): number {
-    const bankroll = parseFloat(process.env.WALLET_BALANCE_USDC ?? '0');
-    if (!bankroll) return 10;
-
-    const maxPerTrade = (parseFloat(process.env.MAX_POSITION_SIZE_PCT ?? '5') / 100) * bankroll;
-    // Half-Kelly-ish: an 8% edge sizes at ~40% of the cap, a 20% edge at 100%.
-    const fraction = Math.min(edge * 5, 1);
-    return Math.max(1, Math.round(maxPerTrade * fraction * 100) / 100);
+  private refreshCalibration(): void {
+    const resolved = this.db.getResolvedForecasts(MODEL_NAME);
+    const fit = fitSigmaScale(resolved);
+    if (fit) {
+      if (Math.abs(fit.scale - this.calibrationScale) > 0.01) {
+        logger.info('Weather: sigma recalibrated from resolved forecasts', {
+          scale: fit.scale.toFixed(3),
+          samples: fit.samples,
+        });
+      }
+      this.calibrationScale = fit.scale;
+    }
   }
 }

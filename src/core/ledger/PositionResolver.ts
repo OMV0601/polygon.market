@@ -34,9 +34,15 @@ export class PositionResolver {
   }
 
   async run(): Promise<void> {
+    // Forecasts are scored first and independently of positions. Most forecasts
+    // never become trades, and those are the ones that keep the calibration
+    // sample honest — restricting scoring to markets we hold would measure the
+    // entry threshold instead of the model.
+    const forecastsScoredStandalone = await this.resolveOutstandingForecasts();
+
     const positions = this.db.getOpenSimulatedPositions();
     if (positions.length === 0) {
-      logger.debug('PositionResolver: no open positions');
+      logger.debug('PositionResolver: no open positions', { forecastsScoredStandalone });
       return;
     }
 
@@ -55,6 +61,7 @@ export class PositionResolver {
 
     let resolved = 0;
     let pricesUpdated = 0;
+    let forecastsScored = forecastsScoredStandalone;
 
     for (const [slug, slugPositions] of bySlug) {
       try {
@@ -71,6 +78,12 @@ export class PositionResolver {
             if (prices[i] > prices[winIdx]) winIdx = i;
           }
           const winnerLabel = (outcomes[winIdx] ?? '').toLowerCase();
+
+          // Score the forecast whether or not it was ever traded. This is the
+          // half of the loop that turns a resolution into evidence about the
+          // model rather than just a P&L line.
+          const scored = this.db.resolveForecasts(slug, winnerLabel === 'yes' ? 1 : 0);
+          if (scored > 0) forecastsScored += scored;
 
           for (const pos of slugPositions) {
             const isWin = pos.outcome.toLowerCase() === winnerLabel;
@@ -115,11 +128,12 @@ export class PositionResolver {
       }
     }
 
-    if (resolved > 0 || pricesUpdated > 0) {
+    if (resolved > 0 || pricesUpdated > 0 || forecastsScored > 0) {
       const summary = this.db.getPnlSummary();
       logger.info('PositionResolver: cycle complete', {
         resolved,
         pricesUpdated,
+        forecastsScored,
         totalPnl: summary.totalPnl.toFixed(4),
         realizedPnl: summary.realizedPnl.toFixed(4),
         unrealizedPnl: summary.unrealizedPnl.toFixed(4),
@@ -130,6 +144,55 @@ export class PositionResolver {
     } else {
       logger.debug('PositionResolver: cycle complete — no changes');
     }
+  }
+
+  /**
+   * Walks markets that carry unresolved forecasts and records the outcome.
+   * Returns how many forecasts were scored.
+   */
+  private async resolveOutstandingForecasts(): Promise<number> {
+    const slugs = this.db.getUnresolvedForecastSlugs();
+    if (slugs.length === 0) return 0;
+
+    let scored = 0;
+    let checked = 0;
+
+    for (const slug of slugs) {
+      try {
+        const market = await this.fetchMarket(slug);
+        checked++;
+        if (!market?.closed) continue;
+
+        const outcomes = parseArr(market.outcomes, ['Yes', 'No']);
+        const prices = parseArr(market.outcomePrices, ['0.5', '0.5']).map(parseFloat);
+
+        let winIdx = 0;
+        for (let i = 1; i < prices.length; i++) {
+          if (prices[i] > prices[winIdx]) winIdx = i;
+        }
+        const winner = (outcomes[winIdx] ?? '').toLowerCase();
+
+        scored += this.db.resolveForecasts(slug, winner === 'yes' ? 1 : 0);
+        await sleep(150);
+      } catch (err) {
+        logger.debug('PositionResolver: forecast resolution failed', {
+          slug,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    if (scored > 0) {
+      const counts = this.db.getForecastCounts();
+      logger.info('PositionResolver: forecasts scored', {
+        scored,
+        marketsChecked: checked,
+        totalResolved: counts.resolved,
+        stillPending: counts.pending,
+      });
+    }
+
+    return scored;
   }
 
   private async fetchMarket(slug: string): Promise<GammaResolution | null> {

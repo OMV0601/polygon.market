@@ -12,7 +12,8 @@
     "report:md": "tsx --no-warnings src/tools/report-markdown.ts",
     "test": "tsx --test tests/unit/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "calibration": "tsx --no-warnings src/tools/calibration.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.37.0",

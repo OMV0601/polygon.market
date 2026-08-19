@@ -7,10 +7,7 @@ import { ExecutionEngine } from './execution/ExecutionEngine';
 import { PositionResolver } from './core/ledger/PositionResolver';
 import { DailyReport } from './core/reporting/DailyReport';
 import { DashboardServer } from './dashboard/server';
-import { WalletMirrorStrategy } from './strategies/wallet-mirror';
 import { WeatherStrategy } from './strategies/weather';
-import { NewsCatalystStrategy } from './strategies/news-catalyst';
-import { CorrelationArbStrategy } from './strategies/correlation-arb';
 import type { BaseStrategy } from './strategies/base/BaseStrategy';
 
 const VALIDATE_ONLY = process.argv.includes('--validate-only');
@@ -86,17 +83,22 @@ async function main(): Promise<void> {
 
   const resolver = new PositionResolver(db);
 
+  // Weather is the only strategy still running. The other three were removed
+  // rather than tuned, each for a structural reason:
+  //
+  //   CorrelationArb  — inferred mutual exclusivity from shared words, so it
+  //                     could hold both legs and lose both. Genuine sum-below-1
+  //                     arb needs the protocol's negRisk outcome sets, which
+  //                     NegRiskConsistencyModel now reads directly.
+  //   WalletMirror    — fills only after a whale's order has already moved the
+  //                     book, buying the price their trade created. The entry
+  //                     penalty exceeds the edge it was chasing.
+  //   NewsCatalyst    — polled RSS every two minutes against markets that
+  //                     reprice on the source in seconds.
+  //
+  // Their history is in git if any of it is worth reviving.
   const strategies: BaseStrategy[] = [
-    new WalletMirrorStrategy(riskManager, bullpen, db, executionEngine),
     new WeatherStrategy(riskManager, bullpen, db, executionEngine),
-    new NewsCatalystStrategy(riskManager, bullpen, db, executionEngine),
-    // CorrelationArbStrategy is disabled: its margin formula, |1 - (priceA +
-    // priceB)|, assumes an antonym pair is exhaustive. Live markets break that
-    // — it paired "Fed increase 50bps" with "Fed decrease 50bps" and reported a
-    // 99.3% arb, when the Fed holding rates makes both legs lose. It bought a
-    // 0.4c lottery ticket on the strength of it. Real risk-free arb needs the
-    // outcomes of a single event, which the temperature bucket series now
-    // gives us; revisit it there rather than by tuning entity matching.
   ];
 
   // One-shot: resolve, scan once, optionally mail the summary, then exit.

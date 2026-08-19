@@ -1,6 +1,6 @@
 import { env } from '../config/env';
-import { RISK } from '../config/constants';
 import { logger } from '../core/logger/logger';
+import { categoryFor, takerFee } from '../core/pricing/FeeModel';
 import { PolymarketClient } from '../core/polymarket/PolymarketClient';
 import { Database } from '../core/ledger/Database';
 import type { CandidatePayload, RiskDecision } from '../core/risk/types';
@@ -71,8 +71,12 @@ export class ExecutionEngine {
       });
     }
 
-    const feePaid = filledUsdc * RISK.POLYMARKET_FEE_RATE;
     const shares = filledUsdc / avgFillPrice;
+    // Real schedule: rate × p × (1−p) per share, not a flat cut of notional.
+    // The old model understated a 50c crypto fill by 3.5x and overstated the
+    // tails, so it got the shape of the cost curve wrong as well as the level.
+    const category = categoryFor(candidate.externalSignalData?.feeCategory as string | undefined);
+    const feePaid = takerFee(shares, avgFillPrice, category);
     const costUsdc = filledUsdc + feePaid;
     const fillPrice = avgFillPrice;
 
