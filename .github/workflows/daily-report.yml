@@ -51,6 +51,12 @@ jobs:
       - name: Print track record to the run log
         run: npm run track-record
 
+      # Logged as well as emailed: when a run looks wrong, the calibration
+      # numbers are the first thing worth reading and should not require
+      # downloading the ledger artifact to see.
+      - name: Print calibration to the run log
+        run: npm run calibration
+
       - name: Build the report
         run: npm run report:md -- report.md
 

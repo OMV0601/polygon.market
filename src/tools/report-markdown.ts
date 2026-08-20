@@ -11,7 +11,9 @@
 
 import fs from 'fs';
 import { Database } from '../core/ledger/Database';
+import { calibrate } from '../core/calibration/CalibrationReport';
 
+const pct = (n: number) => `${(n * 100).toFixed(0)}%`;
 const money = (v: number) => `${v >= 0 ? '+' : '−'}$${Math.abs(v).toFixed(2)}`;
 
 // Written to a file rather than stdout: npm prints its own banner there and the
@@ -74,6 +76,57 @@ function main(): void {
         `| \`${t.marketSlug}\` | ${t.outcome} | $${t.entryPrice.toFixed(2)} | ` +
           `$${(t.shares * t.entryPrice).toFixed(2)} |`
       );
+    }
+  }
+  out.push('');
+
+  // Whether the model beats the price it trades against decides everything
+  // else, and P&L cannot answer it at these sample sizes. Put it in the report
+  // rather than making someone go and ask for it.
+  const resolved = db.getResolvedForecasts();
+  const counts = db.getForecastCounts();
+
+  out.push('### Is the model any good?');
+  out.push('');
+
+  if (resolved.length === 0) {
+    out.push(`_No forecasts scored yet (${counts.pending} awaiting resolution)._`);
+  } else {
+    const models = [...new Set(resolved.map((f) => f.modelName))];
+    out.push('| model | scored | model Brier | market Brier | skill |');
+    out.push('|---|---|---|---|---|');
+    for (const m of models) {
+      const c = calibrate(resolved, m);
+      const skill =
+        c.skill != null ? `${c.skill > 0 ? '+' : ''}${c.skill.toFixed(4)}` : '—';
+      out.push(
+        `| ${m} | ${c.resolvedCount} | ${c.modelBrier.toFixed(4)} | ` +
+          `${c.marketBrier != null ? c.marketBrier.toFixed(4) : '—'} | **${skill}** |`
+      );
+    }
+    out.push('');
+    out.push('_Lower Brier is better. Positive skill means the model beat the market_');
+    out.push('_price on the same questions — the precondition for any edge._');
+    out.push('');
+
+    const primary = calibrate(resolved, models[0]);
+    out.push(`> ${primary.verdict}`);
+    out.push('');
+
+    if (primary.reliability.length > 0) {
+      out.push('<details><summary>Reliability — does a 30% forecast happen 30% of the time?</summary>');
+      out.push('');
+      out.push('| predicted | n | said | happened |');
+      out.push('|---|---|---|---|');
+      for (const b of primary.reliability) {
+        const off = b.meanPredicted < b.ciLow || b.meanPredicted > b.ciHigh;
+        out.push(
+          `| ${pct(b.lower)}–${pct(b.upper)} | ${b.count} | ${pct(b.meanPredicted)} | ` +
+            `${pct(b.actualRate)}${off ? ' ⚠️' : ''} |`
+        );
+      }
+      out.push('');
+      out.push('</details>');
     }
   }
   out.push('');

@@ -63,7 +63,14 @@ export abstract class BaseStrategy {
     let approved = 0;
     let rejected = 0;
 
-    for (const candidate of candidates) {
+    // Best edge first. The daily deployment cap is a fixed budget, and it was
+    // being spent in whatever order the scan happened to produce candidates —
+    // so the day's capital went to the first opportunities seen rather than the
+    // best ones, and later cycles were rejected outright with the budget gone.
+    // Ranking here makes the cap allocate rather than merely truncate.
+    const ranked = [...candidates].sort((a, b) => edgeOf(b) - edgeOf(a));
+
+    for (const candidate of ranked) {
       try {
         const candidateId = this.db.insertCandidate({
           marketSlug: candidate.marketSlug,
@@ -99,4 +106,15 @@ export abstract class BaseStrategy {
       rejected,
     });
   }
+}
+
+/**
+ * Ranking key for competing candidates: expected cents per share, net of fees,
+ * as computed by the edge engine. Falls back to the confidence score for any
+ * strategy that has not been routed through the engine yet.
+ */
+function edgeOf(candidate: CandidatePayload): number {
+  const cents = candidate.externalSignalData?.takerEdgeCents;
+  if (typeof cents === 'number' && isFinite(cents)) return cents;
+  return (candidate.confidenceScore ?? 0) * 100;
 }
