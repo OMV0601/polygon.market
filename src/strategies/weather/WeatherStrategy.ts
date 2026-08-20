@@ -18,6 +18,7 @@ import {
 import { evaluateEdge } from '../../core/edge/EdgeEngine';
 import { correlationGroupFor, sizePosition } from '../../core/risk/PositionSizer';
 import { fitSigmaScale } from '../../core/calibration/CalibrationReport';
+import { mapWithConcurrency, optional } from '../../lib/concurrency';
 import type { CandidatePayload, ForecastData, StrategyModule } from '../../core/risk/types';
 
 /** Identifies this model in the forecast log, so scores stay comparable. */
@@ -52,6 +53,15 @@ interface BucketEntry {
  */
 const HIGH_TEMP_HOUR_UTC_OFFSET_MS = 18 * 60 * 60 * 1000;
 
+/** Events evaluated per cycle, soonest-resolving first. */
+const MAX_EVENTS_PER_CYCLE = 40;
+
+/** Events priced at once. Bounded so neither API sees a burst. */
+const EVENT_CONCURRENCY = 6;
+
+/** Order books fetched at once within one event. */
+const BOOK_CONCURRENCY = 4;
+
 export class WeatherStrategy extends BaseStrategy {
   protected readonly name: StrategyModule = 'WEATHER';
   protected readonly intervalMs = STRATEGY_INTERVALS.WEATHER_MS;
@@ -62,6 +72,7 @@ export class WeatherStrategy extends BaseStrategy {
   private calibrationScale = 1;
 
   protected async scan(): Promise<CandidatePayload[]> {
+    const startedAt = Date.now();
     this.refreshCalibration();
 
     const entries = await this.loadBuckets();
@@ -76,21 +87,47 @@ export class WeatherStrategy extends BaseStrategy {
       events: events.size,
     });
 
-    const candidates: CandidatePayload[] = [];
+    // Soonest-resolving events first: forecast skill is highest at short lead
+    // times, so if the cycle budget runs out the events dropped are the ones
+    // the model is least confident about anyway.
+    const ordered = [...events.entries()].sort((a, b) => {
+      const ta = a[1][0].parsed.targetDate.getTime();
+      const tb = b[1][0].parsed.targetDate.getTime();
+      return ta - tb;
+    });
 
-    for (const [eventKey, buckets] of events) {
-      try {
-        const found = await this.evaluateEvent(eventKey, buckets);
-        candidates.push(...found);
-      } catch (err) {
-        logger.warn('Weather: event evaluation failed', {
-          eventKey,
-          error: (err as Error).message,
-        });
-      }
+    if (ordered.length > MAX_EVENTS_PER_CYCLE) {
+      logger.info('Weather: capping events this cycle', {
+        found: ordered.length,
+        evaluating: MAX_EVENTS_PER_CYCLE,
+      });
     }
+    const selected = ordered.slice(0, MAX_EVENTS_PER_CYCLE);
 
-    logger.info('Weather: scan produced candidates', { count: candidates.length });
+    // The scan is network-bound, so events run concurrently. Sequentially this
+    // took minutes and risked the scheduled job's timeout.
+    const perEvent = await mapWithConcurrency(
+      selected,
+      EVENT_CONCURRENCY,
+      async ([eventKey, buckets]) => {
+        try {
+          return await this.evaluateEvent(eventKey, buckets);
+        } catch (err) {
+          logger.warn('Weather: event evaluation failed', {
+            eventKey,
+            error: (err as Error).message,
+          });
+          return [] as CandidatePayload[];
+        }
+      }
+    );
+
+    const candidates = perEvent.flat();
+    logger.info('Weather: scan produced candidates', {
+      count: candidates.length,
+      eventsEvaluated: selected.length,
+      durationMs: Date.now() - startedAt,
+    });
     return candidates;
   }
 
@@ -254,20 +291,30 @@ export class WeatherStrategy extends BaseStrategy {
       .map((p, i) => ({ ...p, modelProb: normalized[i] }))
       .sort((a, b) => b.modelProb - a.modelProb);
 
-    for (const { entry, modelProb } of ranked) {
+    // Only buckets priced in the tradeable band are worth a book fetch. A few
+    // more than the per-event cap are fetched, since some will come back PASS
+    // or QUOTE and would otherwise leave the cap unfilled.
+    const eligible = ranked
+      .filter(
+        ({ entry }) =>
+          entry.market.bestAsk >= RISK.WEATHER_MIN_ASK &&
+          entry.market.bestAsk <= RISK.WEATHER_MAX_ASK
+      )
+      .slice(0, RISK.WEATHER_MAX_BUCKETS_PER_EVENT * 3);
+
+    // Fetched together rather than one at a time inside the decision loop:
+    // these are independent requests and the loop was serialising them.
+    const books = await mapWithConcurrency(eligible, BOOK_CONCURRENCY, ({ entry }) =>
+      optional(this.bullpen.orderBook(entry.market.slug, 'YES'))
+    );
+
+    for (let i = 0; i < eligible.length; i++) {
       if (candidates.length >= RISK.WEATHER_MAX_BUCKETS_PER_EVENT) break;
 
-      const ask = entry.market.bestAsk;
-      if (ask < RISK.WEATHER_MIN_ASK || ask > RISK.WEATHER_MAX_ASK) continue;
-
-      let book;
-      try {
-        book = await this.bullpen.orderBook(entry.market.slug, 'YES');
-      } catch (err) {
-        logger.debug('Weather: order book unavailable', {
-          slug: entry.market.slug,
-          error: (err as Error).message,
-        });
+      const { entry, modelProb } = eligible[i];
+      const book = books[i];
+      if (!book) {
+        logger.debug('Weather: order book unavailable', { slug: entry.market.slug });
         continue;
       }
 

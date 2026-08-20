@@ -148,10 +148,19 @@ export class OpenMeteoClient {
     try {
       const res = await httpGet<EnsembleResponse>(
         `${ENSEMBLE_BASE}/ensemble?latitude=${latitude}&longitude=${longitude}` +
-          `&hourly=temperature_2m&models=gfs025&forecast_days=4&timezone=auto`
+          `&hourly=temperature_2m&models=gfs025&forecast_days=4&timezone=auto`,
+        // The ensemble only sharpens sigma; the prior curve is a usable
+        // fallback. Retrying a slow endpoint across dozens of events costs far
+        // more than the precision it buys, so fail fast and move on.
+        { timeoutMs: 4_000, retries: 0 }
       );
       data = res.data;
     } catch {
+      // Cache the miss so one unavailable endpoint is not retried per event.
+      this.ensembleCache.set(key, {
+        byDate: new Map(),
+        expiresAt: Date.now() + 10 * 60 * 1000,
+      });
       return null;
     }
 
