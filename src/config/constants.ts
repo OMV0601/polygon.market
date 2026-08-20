@@ -40,8 +40,14 @@ export const RISK = {
   WEATHER_MIN_ASK: 0.05,
   WEATHER_MAX_ASK: 0.90,
   // If modelled probability across an event's scraped buckets sums below this,
-  // the bucket set is probably missing a catch-all and edges are unreliable.
-  WEATHER_MIN_COVERAGE: 0.70,
+  // the bucket set is missing outcomes and the event is skipped. Raised from
+  // 0.70: at that level a third of the distribution could lie outside the
+  // buckets we can see, and any comparison against the market is guesswork.
+  WEATHER_MIN_COVERAGE: 0.90,
+  // Probabilities are only rescaled to sum to 1 when the set is this complete.
+  // Normalising a partial set inflates every bucket by 1/coverage, which
+  // manufactures edge from arithmetic rather than from a forecast.
+  WEATHER_NORMALIZE_COVERAGE: 0.98,
   // Cap positions per event so one city's forecast error can't dominate.
   WEATHER_MAX_BUCKETS_PER_EVENT: 2,
   // Temperature markets are thinner than the wallet-mirror floor assumes:

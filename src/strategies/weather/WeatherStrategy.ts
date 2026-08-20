@@ -24,7 +24,7 @@ import type { CandidatePayload, ForecastData, StrategyModule } from '../../core/
 /** Identifies this model in the forecast log, so scores stay comparable. */
 const MODEL_NAME = 'weather-bucket';
 /** Bump whenever the pricing changes, so old and new are scored separately. */
-const MODEL_VERSION = '2.0.0-ensemble';
+const MODEL_VERSION = '2.1.0-no-partial-normalise';
 
 interface MarketLike {
   slug: string;
@@ -248,10 +248,22 @@ export class WeatherStrategy extends BaseStrategy {
       }),
     }));
 
-    // The bucket set is exhaustive (coverage passed), so probabilities are
-    // renormalised to sum to 1 — the outcomes are mutually exclusive and one of
-    // them must happen.
-    const normalized = normalizeBuckets(priced.map((p) => p.modelProb));
+    // Renormalising is only valid when the buckets really are exhaustive. On a
+    // partial set it scales every probability by 1/coverage — at the old 0.70
+    // gate that was up to a 43% inflation applied uniformly, which reads as
+    // edge against every market price and is the most likely reason the model
+    // scored worse than the market it was betting against.
+    const exhaustive = coverage >= RISK.WEATHER_NORMALIZE_COVERAGE;
+    const normalized = exhaustive
+      ? normalizeBuckets(priced.map((p) => p.modelProb))
+      : priced.map((p) => p.modelProb);
+
+    if (!exhaustive) {
+      logger.debug('Weather: partial bucket set, using unnormalised probabilities', {
+        eventKey,
+        coverage: coverage.toFixed(3),
+      });
+    }
 
     const sigma = sigmaForHorizon(horizonHours, unit, sigmaOpts);
     const resolvesAt = new Date(highTempAt).toISOString();
