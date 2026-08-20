@@ -15,6 +15,7 @@
 import { httpGet } from '../lib/http';
 import { parseWeatherMarket } from '../strategies/weather/parsers/MarketParser';
 import { RISK } from '../config/constants';
+import { takerFeePerShare } from '../core/pricing/FeeModel';
 
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB = 'https://clob.polymarket.com';
@@ -278,9 +279,13 @@ async function main(): Promise<void> {
 
     console.log(`\n  Median cost to enter, tradeable band: ${pct(medBand)}`);
     console.log(`  Median across all liquid markets:     ${pct(medAll)}  ← inflated by penny longshots`);
-    console.log(`  Configured fee (RISK.POLYMARKET_FEE_RATE): ${pct(RISK.POLYMARKET_FEE_RATE)}`);
+    // Real schedule: rate x p x (1-p) per share, evaluated at the median price.
+    const medPrice = median(inBand.map((m) => (m.bestBid! + m.bestAsk!) / 2));
+    const feeAtMedian = takerFeePerShare(medPrice, 'weather') / medPrice;
+    console.log(`  Taker fee at the median price (${medPrice.toFixed(2)}): ${pct(feeAtMedian)} of position value`);
     console.log(
-      `\n  → In the band we'd trade, a strategy must beat ~${pct(medBand + RISK.POLYMARKET_FEE_RATE)} to break even.`
+      `\n  → In the band we'd trade, a taker must beat ~${pct(medBand + feeAtMedian)} to break even.` +
+        `\n    A maker pays no fee and no spread, and collects a rebate on top.`
     );
     console.log('    simulateFill() fills at mid with no spread and no fee, so paper P&L is');
     console.log('    overstated by roughly that much on every trade.');
@@ -333,11 +338,10 @@ async function main(): Promise<void> {
   // ── 5. Arb surface ────────────────────────────────────────────────────────
   h1('5. Correlation-arb surface');
   console.log(`Scan window: top ${RISK.ARB_SCAN_TOP_N_MARKETS} markets by volume`);
-  console.log(`Required gross margin: ${pct(RISK.MIN_ARB_PROFIT_MARGIN + 2 * RISK.POLYMARKET_FEE_RATE)}`);
-  console.log('  (MIN_ARB_PROFIT_MARGIN + both legs of fees)');
-  console.log('\n  Note: pairing two separate markets by entity name is a correlation bet,');
-  console.log('  not an arbitrage — the two can both lose. Genuinely risk-free arb lives');
-  console.log('  inside a single multi-outcome event whose outcome prices sum below 1.');
+  console.log('  Title-matched pairing has been removed: two markets sharing words are');
+  console.log('  not mutually exclusive, so both legs could lose. NegRiskConsistencyModel');
+  console.log('  now reads the protocol\'s own outcome sets, where exclusivity is');
+  console.log('  guaranteed and a sum below 1 is genuinely free money.');
 
   h1('Verdict');
   const blockers: string[] = [];

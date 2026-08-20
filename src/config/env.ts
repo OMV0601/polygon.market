@@ -30,7 +30,7 @@ const EnvSchema = z.object({
 
   // Max capital the bot may deploy into new positions per calendar day (UTC).
   // 0 = no daily cap. Drip-feeds the bankroll instead of deploying it at once.
-  MAX_DAILY_DEPLOYMENT_USDC: z.coerce.number().min(0).default(100),
+  MAX_DAILY_DEPLOYMENT_USDC: z.coerce.number().min(0).default(0),
 
   TRACKED_WALLETS: z
     .string()

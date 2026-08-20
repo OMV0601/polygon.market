@@ -367,6 +367,139 @@ export class Database {
       }>;
   }
 
+  // ── Forecast log ──────────────────────────────────────────────────────────
+
+  /**
+   * Records one model output. Called for every forecast the model produces,
+   * whether or not it becomes a trade — scoring only the traded ones measures
+   * the entry threshold rather than the model.
+   */
+  insertForecast(f: {
+    modelName: string;
+    modelVersion: string;
+    tokenId?: string;
+    marketSlug: string;
+    predictedProb: number;
+    marketPriceAtForecast?: number;
+    features?: Record<string, unknown>;
+    resolvesAt?: string;
+  }): number {
+    this.assertReady();
+    const result = this.db
+      .prepare(`
+        INSERT OR IGNORE INTO forecasts (
+          model_name, model_version, token_id, market_slug, predicted_prob,
+          market_price_at_forecast, features, resolves_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        f.modelName,
+        f.modelVersion,
+        f.tokenId ?? null,
+        f.marketSlug,
+        f.predictedProb,
+        f.marketPriceAtForecast ?? null,
+        f.features ? JSON.stringify(f.features) : null,
+        f.resolvesAt ?? null
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Marks every pending forecast on a market with the outcome that occurred. */
+  resolveForecasts(marketSlug: string, outcome: 0 | 1): number {
+    this.assertReady();
+    const result = this.db
+      .prepare(`
+        UPDATE forecasts
+        SET resolved_outcome = ?, resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE market_slug = ? AND resolved_outcome IS NULL
+      `)
+      .run(outcome, marketSlug);
+    return result.changes as number;
+  }
+
+  getResolvedForecasts(modelName?: string): Array<{
+    modelName: string; predictedProb: number;
+    marketPriceAtForecast: number | null; resolvedOutcome: number;
+  }> {
+    this.assertReady();
+    const sql = `
+      SELECT model_name AS modelName, predicted_prob AS predictedProb,
+             market_price_at_forecast AS marketPriceAtForecast,
+             resolved_outcome AS resolvedOutcome
+      FROM forecasts
+      WHERE resolved_outcome IS NOT NULL
+      ${modelName ? 'AND model_name = ?' : ''}
+      ORDER BY resolved_at ASC
+    `;
+    const stmt = this.db.prepare(sql);
+    return (modelName ? stmt.all(modelName) : stmt.all()) as Array<{
+      modelName: string; predictedProb: number;
+      marketPriceAtForecast: number | null; resolvedOutcome: number;
+    }>;
+  }
+
+  /**
+   * Markets with forecasts still awaiting an outcome, past their resolution
+   * time. These are mostly markets we never traded — which is exactly why they
+   * must be scored: a model judged only on the forecasts that cleared the entry
+   * threshold is being judged on the threshold.
+   */
+  getUnresolvedForecastSlugs(limit = 200): string[] {
+    this.assertReady();
+    const rows = this.db
+      .prepare(`
+        SELECT DISTINCT market_slug AS slug
+        FROM forecasts
+        WHERE resolved_outcome IS NULL
+          AND (resolves_at IS NULL OR resolves_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        ORDER BY resolves_at ASC
+        LIMIT ?
+      `)
+      .all(limit) as Array<{ slug: string }>;
+    return rows.map((r) => r.slug);
+  }
+
+  getForecastCounts(): { total: number; resolved: number; pending: number } {
+    this.assertReady();
+    const row = this.db
+      .prepare(`
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN resolved_outcome IS NOT NULL THEN 1 ELSE 0 END) AS resolved
+        FROM forecasts
+      `)
+      .get() as { total: number; resolved: number | null };
+    const resolved = row.resolved ?? 0;
+    return { total: row.total, resolved, pending: row.total - resolved };
+  }
+
+  /** Persists a book state so parameter changes can be replayed against it. */
+  insertBookSnapshot(s: {
+    marketSlug: string;
+    outcome: string;
+    bestBid: number;
+    bestAsk: number;
+    bids: Array<{ price: number; size: number }>;
+    asks: Array<{ price: number; size: number }>;
+  }): void {
+    this.assertReady();
+    this.db
+      .prepare(`
+        INSERT INTO book_snapshots (market_slug, outcome, best_bid, best_ask, bids_json, asks_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        s.marketSlug,
+        s.outcome,
+        s.bestBid,
+        s.bestAsk,
+        // Only the top of book is replayable signal; the tail is mostly noise
+        // and would grow the file without improving a replay.
+        JSON.stringify(s.bids.slice(0, 10)),
+        JSON.stringify(s.asks.slice(0, 10))
+      );
+  }
+
   getPnlSummary(): {
     realizedPnl: number; unrealizedPnl: number; totalPnl: number;
     openCount: number; closedCount: number; winCount: number; lossCount: number;
