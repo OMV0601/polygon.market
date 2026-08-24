@@ -13,7 +13,8 @@
     "test": "tsx --test tests/unit/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "calibration": "tsx --no-warnings src/tools/calibration.ts"
+    "calibration": "tsx --no-warnings src/tools/calibration.ts",
+    "arb-scan": "tsx --no-warnings src/tools/arb-scan.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.37.0",

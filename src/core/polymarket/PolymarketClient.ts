@@ -1,6 +1,8 @@
 import { env } from '../../config/env';
 import { logger } from '../logger/logger';
 import { httpGet } from '../../lib/http';
+import { categoryFor } from '../pricing/FeeModel';
+import type { NegRiskEvent } from '../../strategies/negrisk/NegRiskConsistencyModel';
 import type {
   BullpenDiscoverResult,
   BullpenHealthStatus,
@@ -31,6 +33,27 @@ interface GammaMarket {
   clobTokenIds: string;       // JSON-encoded: '["tokenId1","tokenId2"]'
   active: boolean;
   closed: boolean;
+}
+
+// ── Raw Gamma event shape (negRisk outcome sets) ──────────────────
+interface GammaEventMarket {
+  id: string;
+  slug: string;
+  question: string;
+  clobTokenIds: string;
+  bestBid?: number | null;
+  bestAsk?: number | null;
+  active?: boolean;
+  closed?: boolean;
+}
+
+interface GammaEvent {
+  id: string | number;
+  slug?: string;
+  title?: string;
+  negRisk?: boolean;
+  negRiskMarketID?: string;
+  markets?: GammaEventMarket[];
 }
 
 // ── Raw CLOB API shape ────────────────────────────────────────────
@@ -131,6 +154,89 @@ export class PolymarketClient {
       total: markets.length,
       fetchedAt: fetchedAt.toISOString(),
     };
+  }
+
+  // ── NegRisk events ────────────────────────────────────────────────
+
+  /**
+   * Events the protocol marks `negRisk`: outcome sets where exactly one market
+   * resolves YES.
+   *
+   * That flag is the entire basis for treating a set as exhaustive, and so for
+   * treating a sub-$1 sum as arbitrage rather than a bet. Sets are never
+   * inferred from titles — the predecessor to this did exactly that and could
+   * hold two legs that both lost.
+   */
+  async negRiskEvents(maxEvents = 500): Promise<NegRiskEvent[]> {
+    const PAGE = 100;
+    const events: NegRiskEvent[] = [];
+    const seen = new Set<string>();
+
+    for (let offset = 0; events.length < maxEvents; offset += PAGE) {
+      let page: GammaEvent[] | undefined;
+
+      try {
+        const res = await httpGet<GammaEvent[]>(
+          `${GAMMA}/events?active=true&closed=false&limit=${PAGE}&offset=${offset}` +
+            `&order=volume24hr&ascending=false`
+        );
+        page = res.data;
+      } catch (err) {
+        if (offset === 0) throw err;
+        logger.debug('PolymarketClient: negRisk pagination stopped', {
+          offset,
+          collected: events.length,
+          reason: (err as Error).message,
+        });
+        break;
+      }
+
+      if (!page?.length) break;
+
+      const fresh = page.filter((e) => !seen.has(String(e.id)));
+      if (fresh.length === 0) break;
+      fresh.forEach((e) => seen.add(String(e.id)));
+
+      for (const e of fresh) {
+        // Both flags appear in the wild depending on endpoint version.
+        const isNegRisk = e.negRisk === true || Boolean(e.negRiskMarketID);
+        if (!isNegRisk) continue;
+
+        const markets = (e.markets ?? []).filter(
+          (m) => m.active !== false && m.closed !== true
+        );
+        if (markets.length < 3) continue; // a 2-leg set is just a binary market
+
+        const outcomes = markets
+          .map((m) => {
+            const tokenIds = this.parseStringOrArray(m.clobTokenIds, []);
+            return {
+              tokenId: tokenIds[0] ?? '',
+              marketSlug: m.slug,
+              title: m.question,
+              // A missing ask means no offer — treated as unfillable below.
+              bestAsk: typeof m.bestAsk === 'number' ? m.bestAsk : NaN,
+              askDepthUsdc: 0, // filled from the live book by the caller
+            };
+          })
+          .filter((o) => o.marketSlug);
+
+        if (outcomes.length !== markets.length) continue;
+
+        events.push({
+          eventId: String(e.id),
+          title: e.title ?? e.slug ?? String(e.id),
+          outcomes,
+          // The venue's own flag. Nothing here infers exclusivity from text.
+          isComplete: true,
+          category: categoryFor(e.title ?? ''),
+        });
+      }
+
+      if (page.length < PAGE) break;
+    }
+
+    return events.slice(0, maxEvents);
   }
 
   // ── Order Book ────────────────────────────────────────────────────
