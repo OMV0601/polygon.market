@@ -273,21 +273,33 @@ export class RiskManager {
         };
       }
 
-      const lossPct = (Math.abs(dailyPnl) / env.WALLET_BALANCE_USDC) * 100;
+      const lost = Math.abs(dailyPnl);
+      const lossPct = (lost / env.WALLET_BALANCE_USDC) * 100;
 
-      if (lossPct >= env.MAX_DAILY_LOSS_PCT) {
+      // Whichever cap binds first stops trading. The absolute limit exists
+      // because that is the number a person actually reacts to; the percentage
+      // keeps a meaning if the bankroll changes.
+      const absoluteCap = env.MAX_DAILY_LOSS_USDC > 0 ? env.MAX_DAILY_LOSS_USDC : Infinity;
+      const percentCap = (env.MAX_DAILY_LOSS_PCT / 100) * env.WALLET_BALANCE_USDC;
+      const cap = Math.min(absoluteCap, percentCap);
+      const boundBy = absoluteCap <= percentCap ? 'absolute' : 'percentage';
+
+      if (lost >= cap) {
         return {
           passed: false,
           detail:
-            `Daily loss limit reached: ${lossPct.toFixed(1)}% drawdown today ` +
-            `(max: ${env.MAX_DAILY_LOSS_PCT}%). No new positions until reset.`,
+            `Daily loss limit reached: $${lost.toFixed(2)} lost today ` +
+            `(${lossPct.toFixed(1)}% of bankroll), cap $${cap.toFixed(2)} ` +
+            `(${boundBy}). No new positions until 00:00 UTC.`,
         };
       }
 
-      if (lossPct >= env.MAX_DAILY_LOSS_PCT * 0.75) {
+      if (lost >= cap * 0.75) {
         return {
           passed: true,
-          warning: `Daily PnL at ${lossPct.toFixed(1)}% drawdown — approaching limit of ${env.MAX_DAILY_LOSS_PCT}%`,
+          warning:
+            `Daily loss $${lost.toFixed(2)} is at ${((lost / cap) * 100).toFixed(0)}% ` +
+            `of the $${cap.toFixed(2)} cap`,
         };
       }
     }

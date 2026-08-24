@@ -22,6 +22,12 @@ const EnvSchema = z.object({
 
   MAX_POSITION_SIZE_PCT: z.coerce.number().min(0.1).max(100).default(5),
   MAX_DAILY_LOSS_PCT: z.coerce.number().min(0.1).max(100).default(10),
+
+  // Absolute daily loss cap in USDC. Applied alongside the percentage — the
+  // tighter of the two stops trading. An absolute figure is what a person
+  // actually has a feeling about ("no more than $10 in a day"); a percentage
+  // silently scales the pain as the bankroll moves. 0 disables it.
+  MAX_DAILY_LOSS_USDC: z.coerce.number().min(0).default(0),
   SPREAD_CEILING: z.coerce.number().min(0).default(0.05),
   LIQUIDITY_MULTIPLIER: z.coerce.number().min(1).default(5),
 
