@@ -117,11 +117,16 @@ async function main(): Promise<void> {
     let reason: string;
     if (opportunity) {
       reason = 'profitable';
+    } else if (askSum >= 1) {
+      // Nothing to explain: the set costs more than it can pay. Exhaustiveness
+      // is irrelevant here, and mentioning it produced a "-1.0% shortfall"
+      // which is not a thing.
+      reason = `sum ${askSum.toFixed(3)} — costs more than the $1 it pays`;
     } else if (!exhaustive) {
-      // The interesting case, and the one that looks most like free money.
+      // The case that looks most like free money and is not.
       reason =
         `sum ${askSum.toFixed(3)} — NOT arbitrage: ${exhaustReason}. ` +
-        `The ${((1 - askSum) * 100).toFixed(1)}% shortfall is the market pricing ` +
+        `The ${((1 - askSum) * 100).toFixed(1)}% discount is the market pricing ` +
         `an unlisted winner.`;
     } else {
       reason = `sum ${askSum.toFixed(3)} — exhaustive but no margin after fees`;
@@ -157,6 +162,11 @@ async function main(): Promise<void> {
     console.log('  Prize field means: the market saying the winner is probably not here.');
     console.log('');
     console.log('  Only sets with an explicit catch-all outcome are treated as real.');
+    console.log('');
+    console.log('  Known limitation: a single match (home/draw/away) is exhaustive by');
+    console.log('  construction with no catch-all leg, so it is refused here too. That');
+    console.log('  costs nothing while those sets quote above 1, which is all of them');
+    console.log('  today — but it is the next thing to fix if arb is worth pursuing.');
   } else {
     console.log(`  ${found} executable set(s) found.`);
     console.log('  Verify one by hand before trusting the scanner: open the event on');
