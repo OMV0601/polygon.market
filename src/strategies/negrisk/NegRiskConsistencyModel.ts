@@ -1,21 +1,24 @@
 /**
  * Genuine intra-event arbitrage.
  *
- * A negRisk event is a set of outcomes the protocol itself guarantees are
- * mutually exclusive and exhaustive — exactly one resolves YES. So the asks
- * must sum to at least 1: buying one share of every outcome costs Σ asks and
- * pays exactly $1 at resolution. When Σ asks < 1 net of fees, that difference
- * is free money and needs no view on which outcome wins.
+ * When a set of outcomes must produce exactly one winner, buying one share of
+ * every outcome costs Σ asks and pays exactly $1 at resolution. If Σ asks is
+ * below $1 net of fees, that difference is profit whichever outcome wins — no
+ * view on the world required.
+ *
+ * The hard part is establishing "must produce exactly one winner", and the
+ * venue's negRisk flag does NOT establish it. negRisk means the outcomes are
+ * mutually exclusive: at most one resolves YES. On an open candidate list the
+ * eventual winner may not be listed, in which case every leg resolves NO and
+ * the full set pays nothing. See exhaustivenessOf for how that is decided, and
+ * for the live case that made the distinction expensive.
  *
  * The predecessor to this file inferred exclusivity from shared words in market
- * titles and an antonym list. That is not a weaker version of this idea, it is
- * a different and unsound one: "Team A wins" and "Team B loses" share tokens
- * and antonyms while being perfectly compatible, so both legs could lose. The
- * guarantee has to come from the event structure, never from the prose.
+ * titles and an antonym list — unsound in a different way: "Team A wins" and
+ * "Team B loses" share tokens and antonyms while being perfectly compatible.
  *
  * Two hard requirements before any of this is real money:
- *   - the outcome set must be complete; a missing leg means the payout is not
- *     guaranteed and the "arb" is an unhedged directional bet
+ *   - the outcome set must be exhaustive, not merely exclusive
  *   - execution must be all-or-nothing; a partial fill leaves naked exposure
  *     with none of the compensating edge
  */
@@ -91,12 +94,32 @@ const CATCH_ALL_RX =
  * title is the mistake that sank the previous arbitrage strategy.
  */
 export function exhaustivenessOf(
-  outcomes: Array<{ title: string }>
+  outcomes: Array<{ title: string }>,
+  eventTitle = ''
 ): { exhaustive: boolean; reason: string } {
   const catchAll = outcomes.find((o) => CATCH_ALL_RX.test(o.title));
   if (catchAll) {
     return { exhaustive: true, reason: `catch-all outcome present: "${catchAll.title}"` };
   }
+
+  // A single fixture has a closed outcome space by construction — one of the
+  // two teams wins or it is a draw, and no third team can appear. There is no
+  // catch-all leg because none is needed. Refusing these was costing nothing
+  // while they all quoted above 1, but it is still the wrong answer.
+  //
+  // The test is deliberately narrow: an "X vs. Y" title AND a two-or-three-leg
+  // set. A candidate list never looks like that, and requiring both means a
+  // mis-titled market cannot slip through on the title alone.
+  const looksLikeFixture = /\s+vs\.?\s+/i.test(eventTitle);
+  const fixtureShaped = outcomes.length === 2 || outcomes.length === 3;
+
+  if (looksLikeFixture && fixtureShaped) {
+    return {
+      exhaustive: true,
+      reason: `single fixture with ${outcomes.length} outcomes — closed by construction`,
+    };
+  }
+
   return {
     exhaustive: false,
     reason:
@@ -116,7 +139,7 @@ export function findArbitrage(
   if (event.outcomes.some((o) => !isFinite(o.bestAsk) || o.bestAsk <= 0)) return null;
 
   // Mutual exclusivity is not exhaustiveness. See exhaustivenessOf.
-  const { exhaustive } = exhaustivenessOf(event.outcomes);
+  const { exhaustive } = exhaustivenessOf(event.outcomes, event.title);
   if (!exhaustive) return null;
 
   const askSum = event.outcomes.reduce((a, o) => a + o.bestAsk, 0);

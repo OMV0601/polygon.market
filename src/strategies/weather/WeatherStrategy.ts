@@ -36,6 +36,14 @@ interface MarketLike {
   endDate?: string;
 }
 
+/** An order book as returned by the client, once null has been ruled out. */
+interface LiveBook {
+  bestBid: number;
+  bestAsk: number;
+  bids: Array<{ price: number; size: number }>;
+  asks: Array<{ price: number; size: number }>;
+}
+
 interface BucketEntry {
   market: MarketLike;
   parsed: ParsedBucketMarket;
@@ -303,59 +311,99 @@ export class WeatherStrategy extends BaseStrategy {
       .map((p, i) => ({ ...p, modelProb: normalized[i] }))
       .sort((a, b) => b.modelProb - a.modelProb);
 
-    // Only buckets priced in the tradeable band are worth a book fetch. A few
-    // more than the per-event cap are fetched, since some will come back PASS
-    // or QUOTE and would otherwise leave the cap unfilled.
-    const eligible = ranked
-      .filter(
-        ({ entry }) =>
-          entry.market.bestAsk >= RISK.WEATHER_MIN_ASK &&
-          entry.market.bestAsk <= RISK.WEATHER_MAX_ASK
-      )
-      .slice(0, RISK.WEATHER_MAX_BUCKETS_PER_EVENT * 3);
+    // Both sides of every bucket are now candidates. Until now `outcome` was
+    // hardcoded to YES, so the model could only ever express "this bucket is
+    // too cheap" — and the overpriced half of its opinion was discarded. That
+    // matters because the favourite-longshot bias makes cheap outcomes the side
+    // that is systematically overpriced, so the discarded half is the one with
+    // the documented edge.
+    //
+    // A bucket the model prices at q trades as YES at the YES ask, or as NO at
+    // the NO ask with probability 1 - q. Both go through the same engine.
+    const eligible = ranked.slice(0, RISK.WEATHER_MAX_BUCKETS_PER_EVENT * 4);
 
-    // Fetched together rather than one at a time inside the decision loop:
-    // these are independent requests and the loop was serialising them.
-    const books = await mapWithConcurrency(eligible, BOOK_CONCURRENCY, ({ entry }) =>
-      optional(this.bullpen.orderBook(entry.market.slug, 'YES'))
-    );
+    // Two books per bucket, all in flight together.
+    const bookPairs = await mapWithConcurrency(eligible, BOOK_CONCURRENCY, async ({ entry }) => ({
+      yes: await optional(this.bullpen.orderBook(entry.market.slug, 'YES')),
+      no: await optional(this.bullpen.orderBook(entry.market.slug, 'NO')),
+    }));
+
+    const probe = Math.max(1, (RISK.WEATHER_MAX_BUCKETS_PER_EVENT / 100) * bankroll);
+
+    interface SideOption {
+      outcome: 'YES' | 'NO';
+      q: number;
+      book: LiveBook;
+      edge: ReturnType<typeof evaluateEdge>;
+    }
 
     for (let i = 0; i < eligible.length; i++) {
       if (candidates.length >= RISK.WEATHER_MAX_BUCKETS_PER_EVENT) break;
 
       const { entry, modelProb } = eligible[i];
-      const book = books[i];
-      if (!book) {
-        logger.debug('Weather: order book unavailable', { slug: entry.market.slug });
+      const { yes, no } = bookPairs[i];
+
+      if (yes) {
+        this.db.insertBookSnapshot({
+          marketSlug: entry.market.slug,
+          outcome: 'YES',
+          bestBid: yes.bestBid,
+          bestAsk: yes.bestAsk,
+          bids: yes.bids,
+          asks: yes.asks,
+        });
+      }
+
+      const sides: SideOption[] = [];
+      for (const [outcome, book, q] of [
+        ['YES', yes, modelProb],
+        ['NO', no, 1 - modelProb],
+      ] as const) {
+        if (!book) continue;
+        // The price band is a statement about where the model is trustworthy,
+        // so it applies to whichever side is being bought.
+        if (book.bestAsk < RISK.WEATHER_MIN_ASK || book.bestAsk > RISK.WEATHER_MAX_ASK) continue;
+
+        sides.push({
+          outcome,
+          q,
+          book,
+          edge: evaluateEdge({
+            q,
+            confidence: Math.min(0.95, coverage),
+            bids: book.bids,
+            asks: book.asks,
+            bestBid: book.bestBid,
+            bestAsk: book.bestAsk,
+            category: 'weather',
+            intendedSizeUsdc: probe,
+            recentVolatility: sigma > 0 ? Math.min(0.05, sigma / 100) : 0,
+          }),
+        });
+      }
+
+      if (sides.length === 0) {
+        logger.debug('Weather: no tradeable side', { slug: entry.market.slug });
         continue;
       }
 
-      // Snapshot the book so a parameter change can be replayed against the
-      // same conditions later instead of costing another day of calendar time.
-      this.db.insertBookSnapshot({
-        marketSlug: entry.market.slug,
-        outcome: 'YES',
-        bestBid: book.bestBid,
-        bestAsk: book.bestAsk,
-        bids: book.bids,
-        asks: book.asks,
-      });
+      // Take the better side. Both cannot have a genuine taker edge at once —
+      // that would be an arbitrage against the bucket's own two books — so if
+      // both look positive it is a sign the quotes are stale, and the larger
+      // one is the one to be suspicious of rather than to size up.
+      sides.sort((a, b) => b.edge.takerEdgeCentsPerShare - a.edge.takerEdgeCentsPerShare);
+      const best = sides[0];
 
-      // Provisional size drives how far up the book the engine walks; the
-      // sizer then prices the edge that walk actually produced.
-      const probe = Math.max(1, (RISK.WEATHER_MAX_BUCKETS_PER_EVENT / 100) * bankroll);
+      if (sides.length === 2 && sides[1].edge.takerEdgeCentsPerShare > 0) {
+        logger.warn('Weather: both sides show positive edge — skipping as stale', {
+          slug: entry.market.slug,
+          yesEdgeCents: sides.find((x) => x.outcome === 'YES')?.edge.takerEdgeCentsPerShare.toFixed(2),
+          noEdgeCents: sides.find((x) => x.outcome === 'NO')?.edge.takerEdgeCentsPerShare.toFixed(2),
+        });
+        continue;
+      }
 
-      const edge = evaluateEdge({
-        q: modelProb,
-        confidence: Math.min(0.95, coverage),
-        bids: book.bids,
-        asks: book.asks,
-        bestBid: book.bestBid,
-        bestAsk: book.bestAsk,
-        category: 'weather',
-        intendedSizeUsdc: probe,
-        recentVolatility: sigma > 0 ? Math.min(0.05, sigma / 100) : 0,
-      });
+      const { outcome, q: sideQ, edge } = best;
 
       if (edge.action === 'PASS') {
         logger.debug('Weather: no actionable edge', { slug: entry.market.slug, reason: edge.reason });
@@ -368,6 +416,7 @@ export class WeatherStrategy extends BaseStrategy {
       if (edge.action === 'QUOTE') {
         logger.info('Weather: maker-only opportunity (no quoting path yet)', {
           slug: entry.market.slug,
+          outcome,
           makerEdgeCents: edge.makerEdgeCentsPerShare.toFixed(2),
           takerEdgeCents: edge.takerEdgeCentsPerShare.toFixed(2),
           quotePrice: edge.quotePrice.toFixed(3),
@@ -376,7 +425,7 @@ export class WeatherStrategy extends BaseStrategy {
       }
 
       const sized = sizePosition({
-        q: modelProb,
+        q: sideQ,
         price: edge.avgFillPrice,
         bankroll,
         maxPositionPct: parseFloat(process.env.MAX_POSITION_SIZE_PCT ?? '5'),
@@ -393,7 +442,9 @@ export class WeatherStrategy extends BaseStrategy {
       logger.info('Weather: tradeable edge', {
         city,
         slug: entry.market.slug,
+        side: outcome,
         modelProb: modelProb.toFixed(3),
+        sideProb: sideQ.toFixed(3),
         avgFill: edge.avgFillPrice.toFixed(3),
         takerEdgeCents: edge.takerEdgeCentsPerShare.toFixed(2),
         feePerShareCents: (edge.feePerShare * 100).toFixed(2),
@@ -416,7 +467,7 @@ export class WeatherStrategy extends BaseStrategy {
       candidates.push({
         strategyModule: 'WEATHER',
         marketSlug: entry.market.slug,
-        outcome: 'YES',
+        outcome,
         impliedProbability: edge.avgFillPrice,
         externalSignalData: {
           city,
@@ -432,6 +483,11 @@ export class WeatherStrategy extends BaseStrategy {
           calibrationScale: this.calibrationScale,
           horizonHours,
           modelProb,
+          // The probability of the side actually bought: modelProb for YES,
+          // its complement for NO. Kept alongside modelProb so calibration
+          // still scores the model's belief about the bucket itself.
+          sideProb: sideQ,
+          outcome,
           avgFillPrice: edge.avgFillPrice,
           takerEdgeCents: edge.takerEdgeCentsPerShare,
           makerEdgeCents: edge.makerEdgeCentsPerShare,

@@ -110,7 +110,7 @@ async function main(): Promise<void> {
     }
 
     const askSum = withDepth.reduce((a, o) => a + o.bestAsk, 0);
-    const { exhaustive, reason: exhaustReason } = exhaustivenessOf(withDepth);
+    const { exhaustive, reason: exhaustReason } = exhaustivenessOf(withDepth, event.title);
 
     const opportunity = findArbitrage({ ...event, outcomes: withDepth }, CAPITAL_USDC);
 
@@ -163,10 +163,9 @@ async function main(): Promise<void> {
     console.log('');
     console.log('  Only sets with an explicit catch-all outcome are treated as real.');
     console.log('');
-    console.log('  Known limitation: a single match (home/draw/away) is exhaustive by');
-    console.log('  construction with no catch-all leg, so it is refused here too. That');
-    console.log('  costs nothing while those sets quote above 1, which is all of them');
-    console.log('  today — but it is the next thing to fix if arb is worth pursuing.');
+    console.log('  Single fixtures ("X vs. Y" with 2-3 legs) are treated as closed by');
+    console.log('  construction — no catch-all leg is needed when no third team can');
+    console.log('  appear. Those are the sets most likely to ever offer real arb.');
   } else {
     console.log(`  ${found} executable set(s) found.`);
     console.log('  Verify one by hand before trusting the scanner: open the event on');

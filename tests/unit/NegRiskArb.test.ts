@@ -159,3 +159,32 @@ test('exhaustivenessOf recognises the common catch-all phrasings', () => {
   }
   assert.equal(exhaustivenessOf([{ title: 'Alice' }, { title: 'Bob' }]).exhaustive, false);
 });
+
+test('a single fixture is exhaustive without a catch-all leg', () => {
+  // Home/draw/away is closed by construction: no third team can appear, so
+  // there is no catch-all leg and none is needed. Refusing these was wrong.
+  // 0.93, not 0.88: a sum below the plausibility floor is refused regardless
+  // of exhaustiveness, which is the floor doing its job.
+  const match = event([0.31, 0.31, 0.31], { catchAll: false });
+  match.title = 'LASK Linz vs. Celtic FC';
+  const { exhaustive, reason } = exhaustivenessOf(match.outcomes, match.title);
+  assert.equal(exhaustive, true, reason);
+  assert.ok(findArbitrage(match, 500), 'a genuinely cheap fixture is arbitrage');
+});
+
+test('a long candidate list is not rescued by a "vs" in the title', () => {
+  // Both conditions must hold. A 42-name field is not a fixture whatever the
+  // title says, and matching on the title alone would reopen the exact hole
+  // the Republican Nominee case exposed.
+  const wide = event(Array(42).fill(0.909 / 42), { catchAll: false });
+  wide.title = 'Candidate A vs. the field 2028';
+  assert.equal(exhaustivenessOf(wide.outcomes, wide.title).exhaustive, false);
+  assert.equal(findArbitrage(wide, 500), null);
+});
+
+test('a fixture quoting above 1 is still refused, just for the right reason', () => {
+  const match = event([0.34, 0.34, 0.34], { catchAll: false });
+  match.title = 'Real Madrid CF vs. Real Sociedad de Fútbol';
+  assert.equal(exhaustivenessOf(match.outcomes, match.title).exhaustive, true);
+  assert.equal(findArbitrage(match, 500), null, 'sum 1.02 costs more than it pays');
+});
