@@ -4,19 +4,26 @@
  * Read-only. Places no orders and writes nothing to the ledger.
  * Run with: npm run arb-scan
  *
- * The appeal of this over the forecast strategy is that it does not require
- * being right about anything. A negRisk event is a set the protocol guarantees
- * has exactly one winner, so a full set pays exactly $1 at resolution. If it
- * costs less than $1 net of fees, the difference is the profit, regardless of
- * which outcome wins.
+ * The appeal over the forecast strategy is that real arbitrage does not require
+ * being right about anything: if a set that must produce exactly one winner
+ * costs less than $1, the difference is profit whoever wins.
  *
- * The catch is depth. A sub-$1 sum on the screen is worthless if the thinnest
- * leg only has a few dollars behind it, so this walks the real book on every
- * leg rather than trusting the quoted best ask.
+ * Two things have to hold, and the second is the one that bites.
+ *
+ * Depth: a sub-$1 sum on screen is worthless if the thinnest leg holds five
+ * dollars, so this walks the real book on every leg.
+ *
+ * Exhaustiveness: negRisk guarantees the outcomes are mutually exclusive, NOT
+ * that one of them wins. Most sets quoting below $1 are open candidate lists
+ * where the eventual winner may not be listed — the shortfall is the market
+ * pricing that risk, not an oversight. Those are reported and refused.
  */
 
 import { PolymarketClient } from '../core/polymarket/PolymarketClient';
-import { findArbitrage } from '../strategies/negrisk/NegRiskConsistencyModel';
+import {
+  exhaustivenessOf,
+  findArbitrage,
+} from '../strategies/negrisk/NegRiskConsistencyModel';
 import { mapWithConcurrency, optional } from '../lib/concurrency';
 import { walkAsks } from '../execution/ExecutionEngine';
 
@@ -102,8 +109,25 @@ async function main(): Promise<void> {
       return { event, opportunity: null, reason: 'a leg has no offers' };
     }
 
+    const askSum = withDepth.reduce((a, o) => a + o.bestAsk, 0);
+    const { exhaustive, reason: exhaustReason } = exhaustivenessOf(withDepth);
+
     const opportunity = findArbitrage({ ...event, outcomes: withDepth }, CAPITAL_USDC);
-    return { event, opportunity, reason: opportunity ? 'profitable' : 'no margin after fees' };
+
+    let reason: string;
+    if (opportunity) {
+      reason = 'profitable';
+    } else if (!exhaustive) {
+      // The interesting case, and the one that looks most like free money.
+      reason =
+        `sum ${askSum.toFixed(3)} — NOT arbitrage: ${exhaustReason}. ` +
+        `The ${((1 - askSum) * 100).toFixed(1)}% shortfall is the market pricing ` +
+        `an unlisted winner.`;
+    } else {
+      reason = `sum ${askSum.toFixed(3)} — exhaustive but no margin after fees`;
+    }
+
+    return { event, opportunity, reason };
   });
 
   let found = 0;
@@ -124,9 +148,15 @@ async function main(): Promise<void> {
   h1('Verdict');
   if (found === 0) {
     console.log('  No executable arbitrage right now.');
-    console.log('  This is the expected result most of the time — these are the most');
-    console.log('  competed-for opportunities on the venue and they close in seconds.');
-    console.log('  What matters is whether any appear at all over repeated scans.');
+    console.log('');
+    console.log('  Note what the sums below 1 actually are. A negRisk event guarantees');
+    console.log('  the outcomes are mutually exclusive — at most one wins. It does NOT');
+    console.log('  guarantee one of them will. On an open candidate list the eventual');
+    console.log('  winner may not be listed at all, in which case every leg resolves NO');
+    console.log('  and a "full set" pays nothing. That is what a 0.37 sum on a Nobel');
+    console.log('  Prize field means: the market saying the winner is probably not here.');
+    console.log('');
+    console.log('  Only sets with an explicit catch-all outcome are treated as real.');
   } else {
     console.log(`  ${found} executable set(s) found.`);
     console.log('  Verify one by hand before trusting the scanner: open the event on');

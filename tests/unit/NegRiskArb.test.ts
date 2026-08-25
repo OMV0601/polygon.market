@@ -1,11 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  exhaustivenessOf,
   findArbitrage,
   type NegRiskEvent,
 } from '../../src/strategies/negrisk/NegRiskConsistencyModel';
 
-function event(asks: number[], depthUsdc = 10_000, isComplete = true): NegRiskEvent {
+/**
+ * Builds a test event. The last outcome is named "Other" by default, since a
+ * set without a catch-all is not exhaustive and the model refuses it outright —
+ * these fixtures are for exercising pricing and sizing, not that guard.
+ */
+function event(
+  asks: number[],
+  opts: { depthUsdc?: number; isComplete?: boolean; catchAll?: boolean } = {}
+): NegRiskEvent {
+  const { depthUsdc = 10_000, isComplete = true, catchAll = true } = opts;
   return {
     eventId: 'e1',
     title: 'test event',
@@ -14,19 +24,19 @@ function event(asks: number[], depthUsdc = 10_000, isComplete = true): NegRiskEv
     outcomes: asks.map((a, i) => ({
       tokenId: `t${i}`,
       marketSlug: `m${i}`,
-      title: `outcome ${i}`,
+      title: catchAll && i === asks.length - 1 ? 'Other' : `outcome ${i}`,
       bestAsk: a,
       askDepthUsdc: depthUsdc,
     })),
   };
 }
 
-test('a set summing well below 1 is arbitrage', () => {
-  // Four legs at 0.20 cost 0.80 for a guaranteed $1 payout.
-  const r = findArbitrage(event([0.2, 0.2, 0.2, 0.2]), 500);
+test('an exhaustive set below 1 after fees is arbitrage', () => {
+  // Four legs at 0.23 cost 0.92 for a payout of exactly $1.
+  const r = findArbitrage(event([0.23, 0.23, 0.23, 0.23]), 500);
   assert.ok(r, 'expected an opportunity');
-  assert.ok(Math.abs(r.askSum - 0.8) < 1e-9);
-  assert.ok(r.netMarginPerSet > 0.15, `margin was ${r.netMarginPerSet}`);
+  assert.ok(Math.abs(r.askSum - 0.92) < 1e-9);
+  assert.ok(r.netMarginPerSet > 0.04, `margin was ${r.netMarginPerSet}`);
   assert.equal(r.legs.length, 4);
 });
 
@@ -41,11 +51,11 @@ test('a set barely below 1 is rejected once fees and buffer are charged', () => 
   assert.equal(findArbitrage(event([0.249, 0.249, 0.249, 0.248]), 500), null);
 });
 
-test('an incomplete set is never arbitrage regardless of price', () => {
-  // Without the venue's guarantee that one outcome must win, a cheap set is a
-  // directional bet that can lose every leg. This is the failure the previous
-  // title-matching strategy had.
-  assert.equal(findArbitrage(event([0.1, 0.1, 0.1, 0.1], 10_000, false), 500), null);
+test('a set the venue has not marked negRisk is never arbitrage', () => {
+  assert.equal(
+    findArbitrage(event([0.23, 0.23, 0.23, 0.23], { isComplete: false }), 500),
+    null
+  );
 });
 
 test('the thinnest leg caps the number of sets', () => {
@@ -57,31 +67,24 @@ test('the thinnest leg caps the number of sets', () => {
 });
 
 test('capital caps the number of sets when the book is deep', () => {
-  const r = findArbitrage(event([0.2, 0.2, 0.2, 0.2]), 100);
+  const r = findArbitrage(event([0.23, 0.23, 0.23, 0.23]), 100);
   assert.ok(r);
-  // $100 at $0.80 a set = 125 sets.
-  assert.equal(r.maxSets, 125);
+  // $100 at $0.92 a set = 108 whole sets.
+  assert.equal(r.maxSets, 108);
 });
 
 test('a leg with no offer is rejected rather than assumed free', () => {
-  const e = event([0.2, 0.2, 0.2, 0.2]);
-  e.outcomes[1].bestAsk = NaN;
-  assert.equal(findArbitrage(e, 500), null);
+  const missing = event([0.23, 0.23, 0.23, 0.23]);
+  missing.outcomes[1].bestAsk = NaN;
+  assert.equal(findArbitrage(missing, 500), null);
 
-  const zero = event([0.2, 0.2, 0.2, 0.2]);
+  const zero = event([0.23, 0.23, 0.23, 0.23]);
   zero.outcomes[1].bestAsk = 0;
   assert.equal(findArbitrage(zero, 500), null);
 });
 
-test('a two-leg set is not treated as a negRisk opportunity', () => {
-  // Guarded by the caller, but assert the model tolerates it rather than
-  // producing a bogus single-leg "arb".
-  const r = findArbitrage(event([0.4]), 500);
-  assert.equal(r, null);
-});
-
 test('profit scales with sets and leg sizes sum to the set cost', () => {
-  const r = findArbitrage(event([0.2, 0.2, 0.2, 0.2]), 100);
+  const r = findArbitrage(event([0.23, 0.23, 0.23, 0.23]), 100);
   assert.ok(r);
   const legTotal = r.legs.reduce((a, l) => a + l.sizeUsdc, 0);
   assert.ok(Math.abs(legTotal - r.maxSets * r.askSum) < 1e-6);
@@ -92,16 +95,67 @@ test('fees alone can erase a gross margin, and the category decides', () => {
   // Four legs at 0.24 sum to 0.96 — a 4c gross margin per set. Crypto charges
   // 0.07 x p x (1-p) per leg, about 1.28c each, so 5.1c of fees turn a
   // seemingly free 4c into a loss. The same set in a zero-fee category is real.
-  const crypto = findArbitrage({ ...event([0.24, 0.24, 0.24, 0.24]), category: 'crypto' }, 500);
+  const crypto = findArbitrage(
+    { ...event([0.24, 0.24, 0.24, 0.24]), category: 'crypto' },
+    500
+  );
   assert.equal(crypto, null, 'crypto fees should exceed a 4c gross margin');
 
-  const geo = findArbitrage({ ...event([0.24, 0.24, 0.24, 0.24]), category: 'geopolitics' }, 500);
+  const geo = findArbitrage(
+    { ...event([0.24, 0.24, 0.24, 0.24]), category: 'geopolitics' },
+    500
+  );
   assert.ok(geo, 'the same prices are profitable where there is no fee');
   assert.ok(geo.netMarginPerSet > 0.03);
 });
 
 test('a wide enough margin survives even the highest fee tier', () => {
-  const crypto = findArbitrage({ ...event([0.2, 0.2, 0.2, 0.2]), category: 'crypto' }, 500);
+  const crypto = findArbitrage(
+    { ...event([0.2275, 0.2275, 0.2275, 0.2275]), category: 'crypto' },
+    500
+  );
   assert.ok(crypto);
-  assert.ok(crypto.netMarginPerSet > 0.1, `got ${crypto?.netMarginPerSet}`);
+  assert.ok(crypto.netMarginPerSet > 0.03, `got ${crypto?.netMarginPerSet}`);
+});
+
+// ── The guard the live scan turned out to need ──────────────────────────────
+
+test('mutual exclusivity is not exhaustiveness', () => {
+  // "Republican Presidential Nominee 2028" is a real negRisk event whose 42
+  // legs summed to 0.909, which an earlier version of this model reported as a
+  // $33 profit. It is not: if the nominee is someone not on the list, all 42
+  // legs resolve NO and the entire stake is lost. The 9% discount is the market
+  // pricing an unlisted winner, correctly.
+  const openField = event(Array(42).fill(0.909 / 42), { catchAll: false });
+  assert.equal(findArbitrage(openField, 500), null);
+
+  // The same prices with a catch-all leg describe a genuinely closed set.
+  const closed = event(Array(42).fill(0.909 / 42), { catchAll: true });
+  assert.ok(findArbitrage(closed, 500), 'a catch-all closes the set');
+});
+
+test('an implausibly low sum is a broken market, not an opportunity', () => {
+  // Seen live: a 20-leg Nobel Prize field at 0.366, a 3-leg primary at 0.003.
+  // Neither is a 63% or 99% edge — they are open fields and stale quotes. Even
+  // with a catch-all present, a sum this far below 1 means something is wrong
+  // rather than that free money is lying around.
+  assert.equal(findArbitrage(event(Array(20).fill(0.366 / 20)), 500), null);
+  assert.equal(findArbitrage(event([0.001, 0.001, 0.001]), 500), null);
+});
+
+test('exhaustivenessOf recognises the common catch-all phrasings', () => {
+  for (const title of [
+    'Other',
+    'Another candidate',
+    'Someone else',
+    'The Field',
+    'None of the above',
+  ]) {
+    assert.equal(
+      exhaustivenessOf([{ title: 'Alice' }, { title }]).exhaustive,
+      true,
+      `expected "${title}" to close the set`
+    );
+  }
+  assert.equal(exhaustivenessOf([{ title: 'Alice' }, { title: 'Bob' }]).exhaustive, false);
 });
